@@ -2,8 +2,10 @@ name: Horse Racing Bot
 
 on:
   schedule:
-    - cron: '*/5 4-15 * * 3'  # 逢星期三
-    - cron: '*/5 4-15 * * 0'  # 逢星期日
+    - cron: '*/5 4-15 * * 0'  # 逢星期日 (Sunday)
+    - cron: '*/5 4-15 * * 3'  # 逢星期三 (Wednesday)
+    - cron: '*/5 4-15 * * 4'  # 逢星期四 (Thursday - 應付今日國慶特別賽)
+    - cron: '*/5 4-15 * * 6'  # 逢星期六 (Saturday)
   workflow_dispatch:
 
 jobs:
@@ -22,7 +24,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install supabase requests pytz
-
 
       - name: Run main script
         env:
