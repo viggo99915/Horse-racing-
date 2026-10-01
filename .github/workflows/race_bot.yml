@@ -1,4 +1,4 @@
-Name: Horse Racing Bot
+name: Horse Racing Bot
 
 on:
   schedule:
