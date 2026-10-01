@@ -2,14 +2,7 @@ name: Horse Racing Bot
 
 on:
   schedule:
-    # 說明：Cron 時間是以 UTC 計算。
-    # 香港時間 (HKT) = UTC + 8。
-    # 假設賽馬通常在 HKT 下午 12:00 至 23:00 之間舉行，
-    # 對應 UTC 時間為 04:00 至 15:00。
-    # 下方設定在賽馬日（星期三、星期日，或特別賽馬日）的該時段內每 5 分鐘執行一次：
     - cron: '*/5 4-15 * * 3,7'
-    
-  # 允許手動觸發（方便你隨時點擊 Run workflow 測試）
   workflow_dispatch:
 
 jobs:
@@ -39,4 +32,3 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python main.py
-
