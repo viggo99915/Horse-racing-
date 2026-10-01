@@ -1,7 +1,6 @@
 import os
 import requests
-from datetime import datetime, timedelta
-import pytz
+from datetime import datetime, timedelta, timezone
 from supabase import create_client
 
 # ----------------- 1. 環境變數初始化 -----------------
@@ -11,7 +10,9 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
-HONG_KONG_TZ = pytz.timezone('Asia/Hong_Kong')
+
+# 使用絕對精準的 UTC+8 時區，完全屏棄會出事的 pytz 偏移
+HK_TZ = timezone(timedelta(hours=8))
 
 def send_telegram(message: str):
     """發送 Telegram 訊息"""
@@ -44,11 +45,10 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     return max(0.0, round(kelly * 100, 2))
 
 def run_racing_pipeline():
-    hk_tz = HONG_KONG_TZ
-    # 【時區校準】：強制透過 UTC 轉換，確保 GitHub Actions 雲端環境獲取到絕對正確的香港時間
-    now = datetime.now(pytz.utc).astimezone(hk_tz)
+    # 【絕對精準時間獲取】：強制以 UTC+8 計算，絕不依賴有問題的轉換
+    now = datetime.now(timezone.utc).astimezone(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
-    print(f"當前香港時間 (已校準): {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"當前香港時間 (絕對校準): {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
     try:
         response = supabase.table("races").select("*").order("race_index").execute()
@@ -76,7 +76,7 @@ def run_racing_pipeline():
             
             if race_index in race_times_map:
                 h, m = race_times_map[race_index]
-                race_time = datetime(now.year, now.month, now.day, h, m, 0, tzinfo=hk_tz)
+                race_time = datetime(now.year, now.month, now.day, h, m, 0, tzinfo=HK_TZ)
             else:
                 continue
             
@@ -87,8 +87,8 @@ def run_racing_pipeline():
             if time_diff <= 0:
                 continue
                 
-            # 🛡️️ 【鐵律 2】：預警窗口設定為 25 分鐘之內（確保第 11 場準時觸發）
-            if 0 < time_diff <= 25 and not r.get("alert_sent", False):
+            # 🛡️ 【鐵律 2】：預警窗口設定為 30 分鐘之內（確保第 11 場 18:25 能夠完美觸發）
+            if 0 < time_diff <= 30 and not r.get("alert_sent", False):
                 races_found = True
                 
                 # 從 Supabase 嚴格抓取真實馬匹資料
@@ -141,7 +141,7 @@ def run_racing_pipeline():
         if races:
             last_race = races[-1]
             last_h, last_m = race_times_map.get(11, (18, 25))
-            last_race_time = datetime(now.year, now.month, now.day, last_h, last_m, 0, tzinfo=hk_tz)
+            last_race_time = datetime(now.year, now.month, now.day, last_h, last_m, 0, tzinfo=HK_TZ)
             
             if (now - last_race_time).total_seconds() > 600 and not last_race.get("summary_sent", False):
                 summary_msg = (
