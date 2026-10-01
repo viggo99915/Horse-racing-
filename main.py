@@ -124,8 +124,8 @@ def run_racing_pipeline():
             time_diff = (race_time - now).total_seconds() / 60.0
             
             # 【核心修改】：只處理「未開跑」且在 10 分鐘內即將開跑、尚未發送通知的場次
-            # time_diff > 0 代表未開跑，time_diff <= 10 代表還有 10 分鐘內開跑
-            if 0 < time_diff <= 10 and not race.get("alert_sent", False):
+            # time_diff > 0 代表未開跑，time_diff <= 10 代表還有 10 分鐘內開if time_diff > 0 and not race.get("alert_sent", False):
+                 if time_diff > 0 and not race.get("alert_sent", False):
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
