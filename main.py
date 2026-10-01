@@ -44,17 +44,15 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     return max(0.0, round(kelly * 100, 2))
 
 def seed_races_for_today_if_empty():
-    """逢賽馬日若 Supabase 內沒有今日賽事，自動按當天是日賽或夜賽生成場次"""
+    """若 Supabase 內沒有今日賽事，自動按當天是日賽或夜賽生成場次"""
     try:
         hk_tz = HONG_KONG_TZ
         now = datetime.now(hk_tz)
         today_date_str = now.strftime('%Y-%m-%d')
         
-        # 檢查今日已經有幾多場賽事
         res = supabase.table("races").select("*").execute()
         races = res.data if res and res.data else []
         
-        # 過濾出屬於今日的賽事
         todays_races = [
             r for r in races 
             if r.get("race_date", "").startswith(today_date_str)
@@ -63,27 +61,23 @@ def seed_races_for_today_if_empty():
         if len(todays_races) == 0:
             print(f"偵測到今日 ({today_date_str}) 尚無賽事資料，正在自動生成...")
             
-            # 判斷星期幾 (weekday: 0=Mon, 2=Wed, 6=Sun)
             weekday = now.weekday()
-            
-            if weekday == 2:  # 星期三通常係夜賽，由 19:15 開始
+            if weekday == 2:  # 星期三夜賽
                 base_time = datetime(now.year, now.month, now.day, 19, 15, 0, tzinfo=hk_tz)
                 total_races = 9
-            else:  # 星期日或特別賽馬日（如今日周四），預設由 13:00 或 13:30 開始
+                venue = "跑馬地"
+            else:  # 星期日或日賽
                 base_time = datetime(now.year, now.month, now.day, 13, 30, 0, tzinfo=hk_tz)
                 total_races = 11
+                venue = "沙田"
                 
-            venue = "跑馬地" if weekday == 2 else "沙田"
-            
             for i in range(1, total_races + 1):
-                race_time = base_time + timedelta(minutes=(i - 1) * 35) # 每場相隔約 35 分鐘
+                race_time = base_time + timedelta(minutes=(i - 1) * 35)
                 race_data = {
                     "race_index": i,
                     "venue": venue,
                     "race_date": race_time.isoformat(),
-                    "status": "upcoming",
-                    "alert_sent": False,
-                    "summary_sent": False
+                    "alert_sent": False
                 }
                 supabase.table("races").insert(race_data).execute()
             print(f"今日 ({venue}) 共 {total_races} 場賽事資料已自動寫入 Supabase！")
@@ -96,7 +90,7 @@ def run_racing_pipeline():
     now = datetime.now(hk_tz)
     print(f"當前香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # 確保每逢賽馬日當天都有資料
+    # 確保今日賽事存在
     seed_races_for_today_if_empty()
     
     try:
@@ -104,7 +98,6 @@ def run_racing_pipeline():
         response = supabase.table("races").select("*").order("race_index").execute()
         races = response.data if response and hasattr(response, 'data') else []
         
-        # 只處理今日的賽事
         todays_races = [
             r for r in races 
             if r.get("race_date", "").startswith(today_date_str)
@@ -131,8 +124,9 @@ def run_racing_pipeline():
                 
             time_diff = (race_time - now).total_seconds() / 60.0
             
-            # 5 分鐘內開跑且未發送推介
-            if 0 <= time_diff <= 5 and not race.get("alert_sent", False):
+            # 調整條件：只要係「還沒發送警報」而且「距離開跑在 10 分鐘之內 (或者剛剛開跑唔超過 30 分鐘内)」嘅場次，就發送推介
+            # 這樣即使你手動執行或稍微遲了幾分鐘，都能夠成功收到推播！
+            if -30 <= time_diff <= 10 and not race.get("alert_sent", False):
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
@@ -166,7 +160,7 @@ def run_racing_pipeline():
                 
                 if best_bet:
                     msg = (
-                        f"🔥 *【第 {race_index} 場｜即將開跑推介】*\n"
+                        f"🔥 *【第 {race_index} 場｜賽事心水推介】*\n"
                         f"📍 場地: {venue} | 開跑: {race_time.strftime('%H:%M')}\n"
                         f"🐎 推薦馬匹: #{best_bet['horse_no']} {best_bet['horse_name']}\n"
                         f"📊 預測勝率: {best_bet['win_prob']*100:.1f}% | 賠率: {best_bet['odds']}\n"
@@ -180,4 +174,6 @@ def run_racing_pipeline():
         print(f"運行賽馬管線時發生錯誤: {e}")
 
 if __name__ == "__main__":
+    # 啟動時先發送一條測試訊息確認 Telegram 連線正常
+    send_telegram("🤖 *【香港賽馬機械人】* 系統已成功啟動並開始執行推介巡檢！")
     run_racing_pipeline()
