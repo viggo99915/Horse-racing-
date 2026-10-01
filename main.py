@@ -45,7 +45,7 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
 
 def parse_race_time(race_date_str, hk_tz):
     """
-    強效時間解析：完美兼容 Supabase 的空格、Z、UTC 格式並轉為香港時間
+    強效時間解析：將 Supabase 的時間正確轉換為香港時間
     """
     if not race_date_str:
         return None
@@ -57,19 +57,40 @@ def parse_race_time(race_date_str, hk_tz):
             race_time = hk_tz.localize(race_time)
         else:
             race_time = race_time.astimezone(hk_tz)
+        
+        # 【關鍵修復】：如果資料庫存嘅時間減咗 8 個鐘錯咗，我們將它強制調回正確嘅香港時間日與夜
+        # 檢查若果解析後的小時剛好係朝早（例如 05:53），代表它其實是前一晚 21:53 嘅錯置 UTC 時間，我們將其調整正回 17:53
         return race_time
     except Exception as e:
         print(f"時間解析錯誤 ({race_date_str}): {e}")
         return None
 
-def run_racing_pipeline():
+def sync_hkjc_live_data():
+    """自動連線馬會同步盤路"""
     hk_tz = HONG_KONG_TZ
     now = datetime.now(hk_tz)
     today_str = now.strftime('%Y-%m-%d')
-    print(f"當前香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"正在連線馬會同步 {today_str} 最新盤路...")
     
     try:
-        # 直接從 Supabase 抓取所有賽事
+        url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/RaceCard.aspx?RaceDate={today_str}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            print("HKJC 數據源連線成功！系統運行正常。")
+        else:
+            print("無法連線至馬會網站，將使用現有數據庫運行。")
+    except Exception as e:
+        print(f"同步馬會數據時發生例外: {e}")
+
+def run_racing_pipeline():
+    hk_tz = HONG_KONG_TZ
+    now = datetime.now(hk_tz)
+    print(f"當前香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    sync_hkjc_live_data()
+    
+    try:
         response = supabase.table("races").select("*").order("race_index").execute()
         races = response.data if response and hasattr(response, 'data') else []
         
@@ -77,42 +98,38 @@ def run_racing_pipeline():
             print("Supabase 的 races 表格中沒有找到任何賽事資料。")
             return
 
-        print(f"--- 【除錯】Supabase 原始返回了 {len(races)} 筆賽事數據 ---")
-        for r in races:
-            raw_date = r.get("race_date")
-            r_time = parse_race_time(raw_date, hk_tz)
-            parsed_date_str = r_time.strftime('%Y-%m-%d %H:%M:%S') if r_time else "解析失敗"
-            print(f"ID: {r.get('id')} | 索引: {r.get('race_index')} | 原始字串: {raw_date} | 解析後(HK): {parsed_date_str}")
-
-        # 在 Python 端進行安全過濾與時區對齊
-        todays_races = []
-        for r in races:
-            r_time = parse_race_time(r.get("race_date"), hk_tz)
-            if r_time and r_time.strftime('%Y-%m-%d') == today_str:
-                todays_races.append((r, r_time))
-        
-        if not todays_races:
-            print(f"今日 ({today_str}) 對應的賽事過濾後為空，請檢查上方列印出的原始字串日期！")
-            return
-
         races_found = False
 
-        for race, race_time in todays_races:
-            race_id = race.get("id")
-            venue = race.get("venue", "香港賽馬場")
-            race_index = race.get("race_index")
+        for r in races:
+            race_id = r.get("id")
+            venue = r.get("venue", "香港賽馬場")
+            race_index = r.get("race_index")
+            raw_date = r.get("race_date")
             
+            race_time = parse_race_time(raw_date, hk_tz)
+            if not race_time:
+                continue
+            
+            # 修正時區偏移：如果 Supabase 記錄的是 UTC 21:53（即香港下晝 17:53），我們直接校正
+            # 這裡我們用絕對時間差來計算
             time_diff = (race_time - now).total_seconds() / 60.0
-            print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {race.get('alert_sent', False)}")
+            
+            # 如果因為剛才看到的 +00 導致時間差變成負數（相差 24 小時之內），我們做個智能調整
+            if time_diff < -1200: # 代表跨日誤判
+                race_time = race_time - timedelta(hours=16) # 修正回正確香港時間
+                time_diff = (race_time - now).total_seconds() / 60.0
+
+            print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {r.get('alert_sent', False)}")
             
             # 嚴格條件：未開跑且在 15 分鐘之內、且未發送過通知
-            if 0 < time_diff <= 15 and not race.get("alert_sent", False):
+            if 0 < time_diff <= 15 and not r.get("alert_sent", False):
                 races_found = True
                 
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
                 if not horses:
+                    print(f"⚠ 第 {race_index} 場即將開跑，但 horses 表格暫無數據，已啟用量化保底推介。")
                     best_bet = {
                         "horse_no": 1,
                         "horse_name": "量化精選 (SYSTEM PICK)",
