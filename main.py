@@ -50,7 +50,6 @@ def parse_race_time(race_date_str, hk_tz):
     if not race_date_str:
         return None
     try:
-        # 將空格替換為 T，並處理 Z
         clean_str = race_date_str.replace('Z', '+00:00').replace(' ', 'T')
         race_time = datetime.fromisoformat(clean_str)
         
@@ -63,34 +62,14 @@ def parse_race_time(race_date_str, hk_tz):
         print(f"時間解析錯誤 ({race_date_str}): {e}")
         return None
 
-def sync_hkjc_live_data():
-    """自動連線馬會同步盤路"""
-    hk_tz = HONG_KONG_TZ
-    now = datetime.now(hk_tz)
-    today_str = now.strftime('%Y-%m-%d')
-    print(f"正在連線馬會同步 {today_str} 最新盤路...")
-    
-    try:
-        url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/RaceCard.aspx?RaceDate={today_str}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            print("HKJC 數據源連線成功！系統運行正常。")
-        else:
-            print("無法連線至馬會網站，將使用現有數據庫運行。")
-    except Exception as e:
-        print(f"同步馬會數據時發生例外: {e}")
-
 def run_racing_pipeline():
     hk_tz = HONG_KONG_TZ
     now = datetime.now(hk_tz)
     today_str = now.strftime('%Y-%m-%d')
     print(f"當前香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    sync_hkjc_live_data()
-    
     try:
-        # 1. 直接抓取所有賽事，避免資料庫欄位格式過濾陷阱
+        # 直接從 Supabase 抓取所有賽事
         response = supabase.table("races").select("*").order("race_index").execute()
         races = response.data if response and hasattr(response, 'data') else []
         
@@ -98,7 +77,14 @@ def run_racing_pipeline():
             print("Supabase 的 races 表格中沒有找到任何賽事資料。")
             return
 
-        # 2. 在 Python 端進行安全過濾與時區對齊
+        print(f"--- 【除錯】Supabase 原始返回了 {len(races)} 筆賽事數據 ---")
+        for r in races:
+            raw_date = r.get("race_date")
+            r_time = parse_race_time(raw_date, hk_tz)
+            parsed_date_str = r_time.strftime('%Y-%m-%d %H:%M:%S') if r_time else "解析失敗"
+            print(f"ID: {r.get('id')} | 索引: {r.get('race_index')} | 原始字串: {raw_date} | 解析後(HK): {parsed_date_str}")
+
+        # 在 Python 端進行安全過濾與時區對齊
         todays_races = []
         for r in races:
             r_time = parse_race_time(r.get("race_date"), hk_tz)
@@ -106,7 +92,7 @@ def run_racing_pipeline():
                 todays_races.append((r, r_time))
         
         if not todays_races:
-            print(f"今日 ({today_str}) 對應的賽事過濾後為空，請檢查 Supabase 內的日期是否正確。")
+            print(f"今日 ({today_str}) 對應的賽事過濾後為空，請檢查上方列印出的原始字串日期！")
             return
 
         races_found = False
@@ -127,7 +113,6 @@ def run_racing_pipeline():
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
                 if not horses:
-                    print(f"⚠ 第 {race_index} 場即將開跑，但 horses 表格暫無數據，已啟用量化保底推介。")
                     best_bet = {
                         "horse_no": 1,
                         "horse_name": "量化精選 (SYSTEM PICK)",
@@ -177,24 +162,6 @@ def run_racing_pipeline():
 
         if not races_found:
             print("目前沒有在 15 分鐘內即將開跑的新賽事。")
-
-        # 檢查今日所有賽事是否已完成，發送收工總結報表
-        if todays_races:
-            last_race, last_race_time = todays_races[-1]
-            if (now - last_race_time).total_seconds() > 1800 and not last_race.get("summary_sent", False):
-                summary_msg = (
-                    f"📊 *【香港賽馬量化系統｜今日賽事總結報表】*\n"
-                    f"📅 日期: {today_str} | 場地: {last_race.get('venue', '香港賽馬場')}\n"
-                    f"🏁 總場次: 今日共 {len(todays_races)} 場賽事已順利完成。\n\n"
-                    f"📈 *量化數據累積與統計*:\n"
-                    f"• 系統自動化推介: 運作流暢\n"
-                    f"• 模型預測回測: 已啟動賽後數據校準\n"
-                    f"• 資金收益率 (ROI): 穩定滾動中 🚀\n\n"
-                    f"💡 *系統提示*: 感謝使用量化系統，明日賽事排程將自動就緒！"
-                )
-                send_telegram(summary_msg)
-                supabase.table("races").update({"summary_sent": True}).eq("id", last_race.get("id")).execute()
-                print("今日賽事總結報表已成功發送！")
 
     except Exception as e:
         print(f"運行賽馬管線時發生錯誤: {e}")
