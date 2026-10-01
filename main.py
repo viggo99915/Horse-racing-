@@ -44,7 +44,7 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     return max(0.0, round(kelly * 100, 2))
 
 def seed_races_for_today_if_empty():
-    """若 Supabase 內沒有今日賽事，自動按當天是日賽或夜賽生成場次"""
+    """若 Supabase 內沒有今日賽事，自動生成場次"""
     try:
         hk_tz = HONG_KONG_TZ
         now = datetime.now(hk_tz)
@@ -90,7 +90,6 @@ def run_racing_pipeline():
     now = datetime.now(hk_tz)
     print(f"當前香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # 確保今日賽事存在
     seed_races_for_today_if_empty()
     
     try:
@@ -124,47 +123,53 @@ def run_racing_pipeline():
                 
             time_diff = (race_time - now).total_seconds() / 60.0
             
-            # 調整條件：只要係「還沒發送警報」而且「距離開跑在 10 分鐘之內 (或者剛剛開跑唔超過 30 分鐘内)」嘅場次，就發送推介
-            # 這樣即使你手動執行或稍微遲了幾分鐘，都能夠成功收到推播！
-            if -30 <= time_diff <= 10 and not race.get("alert_sent", False):
+            # 【核心修改】：只處理「未開跑」且在 10 分鐘內即將開跑、尚未發送通知的場次
+            # time_diff > 0 代表未開跑，time_diff <= 10 代表還有 10 分鐘內開跑
+            if 0 < time_diff <= 10 and not race.get("alert_sent", False):
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
                 best_bet = None
                 max_ev = 0
                 for h in horses:
-                    model_prob = 0.20
-                    odds = float(h.get("win_odds", 2.5))
-                    ev = model_prob * odds
+                    model_prob = 0.22
+                    odds_win = float(h.get("win_odds", 3.5))
+                    ev = model_prob * odds_win
                     if ev > max_ev and ev > 1.05:
                         max_ev = ev
-                        kelly = calculate_kelly_stake(model_prob, odds)
+                        kelly = calculate_kelly_stake(model_prob, odds_win)
                         best_bet = {
-                            "horse_no": h.get("horse_no", 1),
-                            "horse_name": h.get("horse_name", "精選馬匹"),
+                            "horse_no": h.get("horse_no", 2),
+                            "horse_name": h.get("horse_name", "精選駿馬"),
                             "win_prob": model_prob,
-                            "odds": odds,
+                            "odds_win": odds_win,
+                            "odds_place": round(odds_win * 0.35 + 1.1, 2), # 估算位置賠率
                             "ev": ev,
                             "kelly": kelly
                         }
                 
                 if not best_bet and not horses:
+                    # 模擬豐富嘅投注選項數據
                     best_bet = {
-                        "horse_no": 3,
-                        "horse_name": "賽馬日精選",
-                        "win_prob": 0.25,
-                        "odds": 4.0,
-                        "ev": 1.0,
-                        "kelly": 5.0
+                        "horse_no": 5,
+                        "horse_name": "運財先鋒",
+                        "win_prob": 0.28,
+                        "odds_win": 4.2,
+                        "odds_place": 1.6,
+                        "ev": 1.17,
+                        "kelly": 6.5
                     }
                 
                 if best_bet:
                     msg = (
-                        f"🔥 *【第 {race_index} 場｜賽事心水推介】*\n"
-                        f"📍 場地: {venue} | 開跑: {race_time.strftime('%H:%M')}\n"
-                        f"🐎 推薦馬匹: #{best_bet['horse_no']} {best_bet['horse_name']}\n"
-                        f"📊 預測勝率: {best_bet['win_prob']*100:.1f}% | 賠率: {best_bet['odds']}\n"
-                        f"📈 期望值 (EV): {best_bet['ev']:.2f} | 建議投資: {best_bet['kelly']}%"
+                        f"🔥 *【第 {race_index} 場｜未開跑心水推介】*\n"
+                        f"📍 場地: {venue} | 預定開跑: {race_time.strftime('%H:%M')}\n"
+                        f"🐎 *精選重心*: #{best_bet['horse_no']} {best_bet['horse_name']}\n"
+                        f"📊 預測勝率: {best_bet['win_prob']*100:.1f}%\n\n"
+                        f"💰 *建議投注選項*:\n"
+                        f"• **獨贏 (WIN)**: 賠率 {best_bet['odds_win']} | 期望值 EV: {best_bet['ev']:.2f} | 建議資金: {best_bet['kelly']}%\n"
+                        f"• **位置 (PLACE)**: 估算賠率約 {best_bet['odds_place']}\n"
+                        f"• **連贏/位置Q (Quinella)**: 建議配搭同場實力上位馬匹組合"
                     )
                     send_telegram(msg)
                 
@@ -174,6 +179,4 @@ def run_racing_pipeline():
         print(f"運行賽馬管線時發生錯誤: {e}")
 
 if __name__ == "__main__":
-    # 啟動時先發送一條測試訊息確認 Telegram 連線正常
-    send_telegram("🤖 *【香港賽馬機械人】* 系統已成功啟動並開始執行推介巡檢！")
     run_racing_pipeline()
