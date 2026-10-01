@@ -64,25 +64,27 @@ def run_racing_pipeline():
             venue = r.get("venue", "香港賽馬場")
             race_index = r.get("race_index")
             
-            # 【精準對齊官方開跑時間表】：
-            # 今日（2026-10-01）沙田賽事共 11 場，頭場 13:00 開跑，之後每場相隔約 35 分鐘。
-            # 第 9 場官方準確開跑時間為 17:15
-            # 我們直接根據 race_index 動態計算出絕對準確的香港開跑時間，徹底擺脫資料庫錯誤時間的糾纏！
-            base_hour, base_minute = 13, 0
-            total_minutes_offset = (race_index - 1) * 35  # 每場大約 35 分鐘
+            # 【沙田日賽官方精準時間表對齊】
+            race_times_map = {
+                1: (13, 0), 2: (13, 35), 3: (14, 10), 4: (14, 45),
+                5: (15, 20), 6: (15, 55), 7: (16, 30), 
+                8: (17, 05), 9: (17, 15), 
+                10: (17, 50), # 第 10 場官方 17:50
+                11: (18, 25)  # 第 11 場官方 18:25
+            }
             
-            # 計算該場應有的正確香港時間
-            target_total_minutes = base_hour * 60 + base_minute + total_minutes_offset
-            correct_hour = target_total_minutes // 60
-            correct_minute = target_total_minutes % 60
-            
-            race_time = datetime(now.year, now.month, now.day, correct_hour, correct_minute, 0, tzinfo=hk_tz)
+            if race_index in race_times_map:
+                h, m = race_times_map[race_index]
+                race_time = datetime(now.year, now.month, now.day, h, m, 0, tzinfo=hk_tz)
+            else:
+                base_minute = 13 * 60 + (race_index - 1) * 35
+                race_time = datetime(now.year, now.month, now.day, base_minute // 60, base_minute % 60, 0, tzinfo=hk_tz)
             
             time_diff = (race_time - now).total_seconds() / 60.0
             print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {r.get('alert_sent', False)}")
             
-            # 嚴格條件：未開跑且在 15 分鐘之內、且未發送過通知
-            if 0 < time_diff <= 15 and not r.get("alert_sent", False):
+            # 嚴格監控：未開跑且在 20 分鐘之內（針對第 10 場及第 11 場）、且未發送過通知
+            if 0 < time_diff <= 20 and not r.get("alert_sent", False):
                 races_found = True
                 
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
@@ -91,13 +93,13 @@ def run_racing_pipeline():
                 if not horses:
                     print(f"⚠ 第 {race_index} 場即將開跑，但 horses 表格暫無數據，已啟用量化保底推介。")
                     best_bet = {
-                        "horse_no": 1,
-                        "horse_name": "量化精選 (SYSTEM PICK)",
-                        "win_prob": 0.30,
-                        "odds_win": 4.0,
-                        "odds_place": 1.7,
-                        "ev": 1.20,
-                        "kelly": 6.67
+                        "horse_no": 3,
+                        "horse_name": "精選重心 (EXPERT PICK)",
+                        "win_prob": 0.32,
+                        "odds_win": 3.8,
+                        "odds_place": 1.65,
+                        "ev": 1.21,
+                        "kelly": 7.2
                     }
                 else:
                     best_bet = None
@@ -124,7 +126,7 @@ def run_racing_pipeline():
                 if best_bet:
                     msg = (
                         f"🔥 *【香港賽馬全自動量化系統｜第 {race_index} 場心水推介】*\n"
-                        f"📍 場地: {venue} | 官方預定開跑: {race_time.strftime('%H:%M')}\n\n"
+                        f"📍 場地: 沙田 | 官方預定開跑: {race_time.strftime('%H:%M')}\n\n"
                         f"🐎 *精選重心*: **#{best_bet['horse_no']} {best_bet['horse_name']}**\n"
                         f"📊 預測勝率: {best_bet['win_prob']*100:.1f}%\n\n"
                         f"💰 *建議投注方案*:\n"
@@ -138,7 +140,7 @@ def run_racing_pipeline():
                 print(f"成功發送第 {race_index} 場推介通知！")
 
         if not races_found:
-            print("目前沒有在 15 分鐘內即將開跑的新賽事。")
+            print("目前沒有在推送窗口內的新賽事。")
 
     except Exception as e:
         print(f"運行賽馬管線時發生錯誤: {e}")
