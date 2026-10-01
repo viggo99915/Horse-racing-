@@ -1,31 +1,42 @@
-name: Horse Racing Auto Bot
+name: Horse Racing Bot
 
 on:
   schedule:
-    # 逢星期三 (3) 及星期日 (0) 11:00 至 19:00，每 5 分鐘自動運行一次
-    - cron: '*/5 11-19 * * 3,0'
-  workflow_dispatch: # 支援手機手動觸發
+    # 說明：Cron 時間是以 UTC 計算。
+    # 香港時間 (HKT) = UTC + 8。
+    # 假設賽馬通常在 HKT 下午 12:00 至 23:00 之間舉行，
+    # 對應 UTC 時間為 04:00 至 15:00。
+    # 下方設定在賽馬日（星期三、星期日，或特別賽馬日）的該時段內每 5 分鐘執行一次：
+    - cron: '*/5 4-15 * * 3,7'
+    
+  # 允許手動觸發（方便你隨時點擊 Run workflow 測試）
+  workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip'
 
       - name: Install dependencies
-        run: pip install requests supabase pytz pandas
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Run Main Script
+      - name: Run main script
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: python main.py
+        run: |
+          python main.py
+
