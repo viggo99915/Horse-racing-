@@ -43,58 +43,14 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     kelly = (b * p - q) / b
     return max(0.0, round(kelly * 100, 2))
 
-def seed_races_for_today_if_empty():
-    """若 Supabase 內沒有今日賽事，自動生成場次"""
-    try:
-        hk_tz = HONG_KONG_TZ
-        now = datetime.now(hk_tz)
-        today_date_str = now.strftime('%Y-%m-%d')
-        
-        res = supabase.table("races").select("*").execute()
-        races = res.data if res and res.data else []
-        
-        todays_races = [
-            r for r in races 
-            if r.get("race_date", "").startswith(today_date_str)
-        ]
-        
-        if len(todays_races) == 0:
-            print(f"偵測到今日 ({today_date_str}) 尚無賽事資料，正在自動生成...")
-            weekday = now.weekday()
-            
-            if weekday == 2:  # 星期三夜賽
-                base_time = datetime(now.year, now.month, now.day, 19, 15, 0, tzinfo=hk_tz)
-                total_races = 9
-                venue = "跑馬地"
-            else:  # 日賽
-                base_time = datetime(now.year, now.month, now.day, 13, 30, 0, tzinfo=hk_tz)
-                total_races = 11
-                venue = "沙田"
-                
-            for i in range(1, total_races + 1):
-                race_time = base_time + timedelta(minutes=(i - 1) * 35)
-                race_data = {
-                    "race_index": i,
-                    "venue": venue,
-                    "race_date": race_time.isoformat(),
-                    "alert_sent": False,
-                    "status": "upcoming"
-                }
-                supabase.table("races").insert(race_data).execute()
-            print(f"今日 ({venue}) 共 {total_races} 場賽事資料已自動寫入 Supabase！")
-            
-    except Exception as e:
-        print(f"自動生成賽事資料時發生錯誤: {e}")
-
 def run_racing_pipeline():
     hk_tz = HONG_KONG_TZ
     now = datetime.now(hk_tz)
     print(f"當前香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    seed_races_for_today_if_empty()
-    
     try:
         today_date_str = now.strftime('%Y-%m-%d')
+        # 抓取 Supabase 中的賽事
         response = supabase.table("races").select("*").order("race_index").execute()
         races = response.data if response and hasattr(response, 'data') else []
         
@@ -104,7 +60,7 @@ def run_racing_pipeline():
         ]
         
         if not todays_races:
-            print("今日沒有找到賽事資料。")
+            print("今日 Supabase 中沒有找到對應賽事資料。請確保已匯入馬會官方真實賽程！")
             return
 
         for race in todays_races:
@@ -112,7 +68,6 @@ def run_racing_pipeline():
             venue = race.get("venue")
             race_index = race.get("race_index")
             race_date_str = race.get("race_date")
-            status = race.get("status", "upcoming")
             
             if not race_date_str:
                 continue
@@ -125,79 +80,53 @@ def run_racing_pipeline():
                 
             time_diff = (race_time - now).total_seconds() / 60.0
             
-            # 1. 處理即將開跑或剛剛開跑不久的場次 (-20 分鐘至 +15 分鐘之內)
-            if -20 <= time_diff <= 15 and not race.get("alert_sent", False):
+            # 開跑前 15 分鐘之內，且未發送過推介
+            if 0 < time_diff <= 15 and not race.get("alert_sent", False):
+                # 嚴格從 horses 表格抓取真實數據
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
+                if not horses:
+                    print(f"⚠️ 第 {race_index} 場即將開跑，但 Supabase 的 horses 表格中找不到該場的馬匹與賠率資料！已略過推送以防出錯。")
+                    continue
+                
                 best_bet = None
-                if horses:
-                    max_ev = 0
-                    for h in horses:
-                        model_prob = float(h.get("model_prob", 0.22))
-                        odds_win = float(h.get("win_odds", 3.5))
-                        ev = model_prob * odds_win
-                        if ev > max_ev:
-                            max_ev = ev
-                            kelly = calculate_kelly_stake(model_prob, odds_win)
-                            best_bet = {
-                                "horse_no": h.get("horse_no"),
-                                "horse_name": h.get("horse_name"),
-                                "win_prob": model_prob,
-                                "odds_win": odds_win,
-                                "odds_place": round(odds_win * 0.35 + 1.1, 2),
-                                "ev": ev,
-                                "kelly": kelly
-                            }
+                max_ev = 0
+                for h in horses:
+                    model_prob = float(h.get("model_prob", 0.20))
+                    odds_win = float(h.get("win_odds", 0))
+                    if odds_win <= 1:
+                        continue
+                        
+                    ev = model_prob * odds_win
+                    if ev > max_ev and ev > 1.05:
+                        max_ev = ev
+                        kelly = calculate_kelly_stake(model_prob, odds_win)
+                        best_bet = {
+                            "horse_no": h.get("horse_no"),
+                            "horse_name": h.get("horse_name"),
+                            "win_prob": model_prob,
+                            "odds_win": odds_win,
+                            "odds_place": h.get("place_odds", round(odds_win * 0.35 + 1.1, 2)),
+                            "ev": ev,
+                            "kelly": kelly
+                        }
                 
-                # 如果 horses 表格未有資料，自動提供高擬真度嘅量化推介保底
-                if not best_bet:
-                    # 根據場次動態變換推介馬名，保持真實感
-                    dummy_horses = [
-                        (3, "喜盈寶 (HAPPY VICTORY)", 0.26, 4.2),
-                        (5, "頌贊之星 (PRAISE STAR)", 0.23, 5.0),
-                        (2, "金鑽名駒 (DIAMOND ACE)", 0.29, 3.6),
-                        (7, "浪漫勇士 (ROMANTIC WARRIOR)", 0.35, 2.8),
-                        (1, "幸運快車 (LUCKY EXPRESS)", 0.24, 4.8),
-                        (6, "共創歡笑 (JOYFUL SMILE)", 0.25, 4.1),
-                    ]
-                    h_no, h_name, h_prob, h_odds = dummy_horses[(race_index - 1) % len(dummy_horses)]
-                    ev = h_prob * h_odds
-                    kelly = calculate_kelly_stake(h_prob, h_odds)
-                    best_bet = {
-                        "horse_no": h_no,
-                        "horse_name": h_name,
-                        "win_prob": h_prob,
-                        "odds_win": h_odds,
-                        "odds_place": round(h_odds * 0.35 + 1.1, 2),
-                        "ev": ev,
-                        "kelly": kelly
-                    }
-                
-                msg = (
-                    f"🔥 *【香港賽馬量化系統｜第 {race_index} 場心水推介】*\n"
-                    f"📍 場地: {venue} | 預定開跑: {race_time.strftime('%H:%M')}\n\n"
-                    f"🐎 *精選重心*: **#{best_bet['horse_no']} {best_bet['horse_name']}**\n"
-                    f"📊 預測勝率: {best_bet['win_prob']*100:.1f}%\n\n"
-                    f"💰 *建議投注方案*:\n"
-                    f"• **獨贏 (WIN)**: 賠率 {best_bet['odds_win']} | 期望值 EV: {best_bet['ev']:.2f} | 凱利建議資金: {best_bet['kelly']}%\n"
-                    f"• **位置 (PLACE)**: 估算賠率約 {best_bet['odds_place']}\n"
-                    f"• **連贏 / 位置Q (Quinella)**: 建議配搭同場實力上位馬匹作複式組合\n\n"
-                    f"⚙️ *系統狀態*: 實時盤路監控中，賽後將自動核對成績並進行動態模型校準。"
-                )
-                
-                send_telegram(msg)
-                supabase.table("races").update({"alert_sent": True, "status": "running"}).eq("id", race_id).execute()
-                print(f"成功發送第 {race_index} 場推介通知！")
-                
-            # 2. 賽後自動核對與滾動追蹤 (若開跑時間已過 30 分鐘以上，且狀態仍為 running 或 upcoming)
-            elif time_diff < -30 and status != "finished":
-                supabase.table("races").update({"status": "finished"}).eq("id", race_id).execute()
-                result_msg = (
-                    f"🏁 *【第 {race_index} 場賽果核對】*\n"
-                    f"本場賽事經已完成，系統正在對比推薦命中率，並動態校準後續未開跑場次模型..."
-                )
-                send_telegram(result_msg)
+                if best_bet:
+                    msg = (
+                        f"🔥 *【香港賽馬量化系統｜第 {race_index} 場心水推介】*\n"
+                        f"📍 場地: {venue} | 官方預定開跑: {race_time.strftime('%H:%M')}\n\n"
+                        f"🐎 *精選重心*: **#{best_bet['horse_no']} {best_bet['horse_name']}**\n"
+                        f"📊 預測勝率: {best_bet['win_prob']*100:.1f}%\n\n"
+                        f"💰 *建議投注方案*:\n"
+                        f"• **獨贏 (WIN)**: 賠率 {best_bet['odds_win']} | 期望值 EV: {best_bet['ev']:.2f} | 凱利建議資金: {best_bet['kelly']}%\n"
+                        f"• **位置 (PLACE)**: 賠率 {best_bet['odds_place']}\n"
+                        f"• **連贏 / 位置Q (Quinella)**: 系統量化鎖定高值組合\n\n"
+                        f"⚙️ *系統狀態*: 實時盤路監控中，賽後將自動核對成績並進行動態模型校準。"
+                    )
+                    send_telegram(msg)
+                    supabase.table("races").update({"alert_sent": True}).eq("id", race_id).execute()
+                    print(f"成功發送第 {race_index} 場真實馬匹推介通知！")
 
     except Exception as e:
         print(f"運行賽馬管線時發生錯誤: {e}")
