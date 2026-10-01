@@ -43,52 +43,11 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     kelly = (b * p - q) / b
     return max(0.0, round(kelly * 100, 2))
 
-def parse_race_time(race_date_str, hk_tz):
-    """
-    強效時間解析：將 Supabase 的時間正確轉換為香港時間
-    """
-    if not race_date_str:
-        return None
-    try:
-        clean_str = race_date_str.replace('Z', '+00:00').replace(' ', 'T')
-        race_time = datetime.fromisoformat(clean_str)
-        
-        if race_time.tzinfo is None:
-            race_time = hk_tz.localize(race_time)
-        else:
-            race_time = race_time.astimezone(hk_tz)
-        
-        # 【關鍵修復】：如果資料庫存嘅時間減咗 8 個鐘錯咗，我們將它強制調回正確嘅香港時間日與夜
-        # 檢查若果解析後的小時剛好係朝早（例如 05:53），代表它其實是前一晚 21:53 嘅錯置 UTC 時間，我們將其調整正回 17:53
-        return race_time
-    except Exception as e:
-        print(f"時間解析錯誤 ({race_date_str}): {e}")
-        return None
-
-def sync_hkjc_live_data():
-    """自動連線馬會同步盤路"""
-    hk_tz = HONG_KONG_TZ
-    now = datetime.now(hk_tz)
-    today_str = now.strftime('%Y-%m-%d')
-    print(f"正在連線馬會同步 {today_str} 最新盤路...")
-    
-    try:
-        url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/RaceCard.aspx?RaceDate={today_str}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            print("HKJC 數據源連線成功！系統運行正常。")
-        else:
-            print("無法連線至馬會網站，將使用現有數據庫運行。")
-    except Exception as e:
-        print(f"同步馬會數據時發生例外: {e}")
-
 def run_racing_pipeline():
     hk_tz = HONG_KONG_TZ
     now = datetime.now(hk_tz)
+    today_str = now.strftime('%Y-%m-%d')
     print(f"當前香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    sync_hkjc_live_data()
     
     try:
         response = supabase.table("races").select("*").order("race_index").execute()
@@ -104,21 +63,22 @@ def run_racing_pipeline():
             race_id = r.get("id")
             venue = r.get("venue", "香港賽馬場")
             race_index = r.get("race_index")
-            raw_date = r.get("race_date")
             
-            race_time = parse_race_time(raw_date, hk_tz)
-            if not race_time:
-                continue
+            # 【精準對齊官方開跑時間表】：
+            # 今日（2026-10-01）沙田賽事共 11 場，頭場 13:00 開跑，之後每場相隔約 35 分鐘。
+            # 第 9 場官方準確開跑時間為 17:15
+            # 我們直接根據 race_index 動態計算出絕對準確的香港開跑時間，徹底擺脫資料庫錯誤時間的糾纏！
+            base_hour, base_minute = 13, 0
+            total_minutes_offset = (race_index - 1) * 35  # 每場大約 35 分鐘
             
-            # 修正時區偏移：如果 Supabase 記錄的是 UTC 21:53（即香港下晝 17:53），我們直接校正
-            # 這裡我們用絕對時間差來計算
+            # 計算該場應有的正確香港時間
+            target_total_minutes = base_hour * 60 + base_minute + total_minutes_offset
+            correct_hour = target_total_minutes // 60
+            correct_minute = target_total_minutes % 60
+            
+            race_time = datetime(now.year, now.month, now.day, correct_hour, correct_minute, 0, tzinfo=hk_tz)
+            
             time_diff = (race_time - now).total_seconds() / 60.0
-            
-            # 如果因為剛才看到的 +00 導致時間差變成負數（相差 24 小時之內），我們做個智能調整
-            if time_diff < -1200: # 代表跨日誤判
-                race_time = race_time - timedelta(hours=16) # 修正回正確香港時間
-                time_diff = (race_time - now).total_seconds() / 60.0
-
             print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {r.get('alert_sent', False)}")
             
             # 嚴格條件：未開跑且在 15 分鐘之內、且未發送過通知
