@@ -1,15 +1,15 @@
-name: Horse Racing Bot
+name: Horse Racing Crawler
 
 on:
   schedule:
-    - cron: '*/5 4-15 * * 0'  # 逢星期日 (日馬)
-    - cron: '*/5 4-15 * * 3'  # 逢星期三 (夜馬)
-    - cron: '*/5 4-15 * * 4'  # 逢星期四 (應付國慶等特別賽馬日)
-    - cron: '*/5 4-15 * * 6'  # 逢星期六 (應付特別加場/香港國際賽期等)
+    - cron: '*/5 4-15 * * 0'  # 星期日 (日馬)
+    - cron: '*/5 4-15 * * 3'  # 星期三 (夜馬)
+    - cron: '*/5 4-15 * * 4'  # 星期四 (特別賽馬日防護，如今日國慶日)
+    - cron: '*/5 4-15 * * 6'  # 星期六 (加場防護)
   workflow_dispatch:
 
 jobs:
-  run-bot:
+  crawl:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -23,14 +23,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install supabase requests pytz
+          python -m pip install supabase requests beautifulsoup4 lxml  # (按你爬蟲實際需要的套件調整)
 
-      - name: Run main script
+      - name: Run Crawler
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python main.py
+          python crawler.py  # 請換成你實際的上游爬蟲主程式檔名
