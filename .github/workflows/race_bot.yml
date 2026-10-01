@@ -2,7 +2,8 @@ name: Horse Racing Bot
 
 on:
   schedule:
-    - cron: '*/5 4-15 * * 3,7'
+    - cron: '*/5 4-15 * * 3'  # 逢星期三
+    - cron: '*/5 4-15 * * 0'  # 逢星期日
   workflow_dispatch:
 
 jobs:
