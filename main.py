@@ -45,7 +45,7 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
 
 def run_racing_pipeline():
     hk_tz = HONG_KONG_TZ
-    # 【關鍵修復】：強制透過 UTC 轉換，確保 GitHub Actions 雲端環境獲取到絕對正確的香港時間
+    # 【時區校準】：強制透過 UTC 轉換，確保 GitHub Actions 雲端環境獲取到絕對正確的香港時間
     now = datetime.now(pytz.utc).astimezone(hk_tz)
     today_str = now.strftime('%Y-%m-%d')
     print(f"當前香港時間 (已校準): {now.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -87,7 +87,7 @@ def run_racing_pipeline():
             if time_diff <= 0:
                 continue
                 
-            # 🛡️ 【鐵律 2】：預警窗口設定為 25 分鐘之內（確保第 11 場在 18:00 後準時觸發）
+            # 🛡️️ 【鐵律 2】：預警窗口設定為 25 分鐘之內（確保第 11 場準時觸發）
             if 0 < time_diff <= 25 and not r.get("alert_sent", False):
                 races_found = True
                 
