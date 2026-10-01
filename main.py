@@ -45,14 +45,13 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
 
 def parse_race_time(race_date_str, hk_tz):
     """
-    強效正規化時間解析：完美兼容 Supabase 的 timestamptz 各種 ISO 格式
+    強效正規化時間解析：完美兼容 Python 3.10 與 Supabase 的空格/Z格式
     """
     if not race_date_str:
         return None
     try:
-        # 處理帶有毫秒或 Z 的字串
-        clean_str = race_date_str.replace('Z', '+00:00')
-        # 如果有微秒（例如 .123456），Python 的 fromisoformat 可以直接處理
+        # 將 Supabase 的空格替換為 T，並處理 Z
+        clean_str = race_date_str.replace('Z', '+00:00').replace(' ', 'T')
         race_time = datetime.fromisoformat(clean_str)
         
         if race_time.tzinfo is None:
