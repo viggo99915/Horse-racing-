@@ -45,28 +45,27 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
 
 def parse_race_time(race_date_str, hk_tz):
     """
-    通用強效時區解析函數：自動修正 Supabase 存儲的各種時間格式，統一轉為香港時間
+    強效正規化時間解析：完美兼容 Supabase 的 timestamptz 各種 ISO 格式
     """
     if not race_date_str:
         return None
     try:
+        # 處理帶有毫秒或 Z 的字串
         clean_str = race_date_str.replace('Z', '+00:00')
+        # 如果有微秒（例如 .123456），Python 的 fromisoformat 可以直接處理
         race_time = datetime.fromisoformat(clean_str)
         
-        # 如果資料庫時間沒有時區，預設補上香港時區或進行轉換
         if race_time.tzinfo is None:
             race_time = hk_tz.localize(race_time)
         else:
             race_time = race_time.astimezone(hk_tz)
         return race_time
     except Exception as e:
-        print(f"解析時間失敗 ({race_date_str}): {e}")
+        print(f"時間解析錯誤 ({race_date_str}): {e}")
         return None
 
 def sync_hkjc_live_data():
-    """
-    自動連線馬會同步盤路與數據（輕量化防護）
-    """
+    """自動連線馬會同步盤路"""
     hk_tz = HONG_KONG_TZ
     now = datetime.now(hk_tz)
     today_str = now.strftime('%Y-%m-%d')
@@ -76,7 +75,6 @@ def sync_hkjc_live_data():
         url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/RaceCard.aspx?RaceDate={today_str}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         resp = requests.get(url, headers=headers, timeout=10)
-        
         if resp.status_code == 200:
             print("HKJC 數據源連線成功！系統運行正常。")
         else:
@@ -89,7 +87,6 @@ def run_racing_pipeline():
     now = datetime.now(hk_tz)
     print(f"當前香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # 執行實時盤路同步
     sync_hkjc_live_data()
     
     try:
@@ -97,30 +94,29 @@ def run_racing_pipeline():
         response = supabase.table("races").select("*").order("race_index").execute()
         races = response.data if response and hasattr(response, 'data') else []
         
-        # 過濾今日賽事
+        if not races:
+            print("Supabase 的 races 表格中沒有找到任何賽事資料。")
+            return
+
         todays_races = []
         for r in races:
             r_time = parse_race_time(r.get("race_date"), hk_tz)
-            if r_time and r_time.strftime('%Y-%m-%d') == today_date_str:
-                todays_races.append(r)
+            if r_time:
+                # 嚴格校驗：只抓取日期完全相符（YYYY-MM-DD）的賽事
+                if r_time.strftime('%Y-%m-%d') == today_date_str:
+                    todays_races.append((r, r_time))
         
         if not todays_races:
-            print("今日 Supabase 中沒有找到對應賽事資料。")
+            print(f"今日 ({today_date_str}) 對應的賽事過濾後為空，請檢查 Supabase 內的日期是否正確。")
             return
 
         races_found = False
 
-        # 遍歷今日所有場次
-        for race in todays_races:
+        for race, race_time in todays_races:
             race_id = race.get("id")
-            venue = race.get("venue", "沙田/跑馬地")
+            venue = race.get("venue", "香港賽馬場")
             race_index = race.get("race_index")
-            race_date_str = race.get("race_date")
             
-            race_time = parse_race_time(race_date_str, hk_tz)
-            if not race_time:
-                continue
-                
             time_diff = (race_time - now).total_seconds() / 60.0
             print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {race.get('alert_sent', False)}")
             
@@ -128,13 +124,11 @@ def run_racing_pipeline():
             if 0 < time_diff <= 15 and not race.get("alert_sent", False):
                 races_found = True
                 
-                # 從 Supabase 抓取該場馬匹資料
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
-                # 如果該場 horses 尚未填寫，使用預設量化保底模型避免中斷
                 if not horses:
-                    print(f"⚠️️ 第 {race_index} 場即將開跑，但 horses 表格暫無數據，已啟用量化保底推介。")
+                    print(f"⚠ 第 {race_index} 場即將開跑，但 horses 表格暫無數據，已啟用量化保底推介。")
                     best_bet = {
                         "horse_no": 1,
                         "horse_name": "量化精選 (SYSTEM PICK)",
@@ -174,39 +168,16 @@ def run_racing_pipeline():
                         f"📊 預測勝率: {best_bet['win_prob']*100:.1f}%\n\n"
                         f"💰 *建議投注方案*:\n"
                         f"• **獨贏 (WIN)**: 賠率 {best_bet['odds_win']} | 期望值 EV: {best_bet['ev']:.2f} | 凱利建議資金: {best_bet['kelly']}%\n"
-                        f"• **位置 (PLACE)**: 賠率 {best_bet['odds_place']}\n"
-                        f"• **連贏 / 位置Q (Quinella)**: 系統量化鎖定高值組合\n\n"
-                        f"⚙️ *系統狀態*: 實時盤路自動同步中，賽後將自動結算。"
+                        f"• **位置 (PLACE)**: 賠率 {best_bet['odds_place']}\n\n"
+                        f"⚙️ *系統狀態*: 實時盤路自動同步中。"
                     )
                     send_telegram(msg)
                     
-                # 更新該場次的 alert_sent 狀態，避免重複發送
                 supabase.table("races").update({"alert_sent": True}).eq("id", race_id).execute()
-                print(f"成功發送第 {race_index} 場自動化推介通知！")
+                print(f"成功發送第 {race_index} 場推介通知！")
 
         if not races_found:
             print("目前沒有在 15 分鐘內即將開跑的新賽事。")
-
-        # 檢查今日所有賽事是否已經跑完，若是則發送「收工總結報表」
-        if todays_races:
-            last_race = todays_races[-1]
-            last_race_time = parse_race_time(last_race.get("race_date"), hk_tz)
-            if last_race_time:
-                # 當前時間超過最後一場開跑後 30 分鐘，且尚未發送過總結
-                if (now - last_race_time).total_seconds() > 1800 and not last_race.get("summary_sent", False):
-                    summary_msg = (
-                        f"📊 *【香港賽馬量化系統｜今日賽事總結報表】*\n"
-                        f"📅 日期: {today_date_str} | 場地: {last_race.get('venue', '香港賽馬場')}\n"
-                        f"🏁 總場次: 今日共 {len(todays_races)} 場賽事已順利完成。\n\n"
-                        f"📈 *量化數據累積與統計*:\n"
-                        f"• 系統自動化推介: 運作流暢\n"
-                        f"• 模型預測回測: 已啟動賽後數據校準\n"
-                        f"• 資金收益率 (ROI): 穩定滾動中 🚀\n\n"
-                        f"💡 *系統提示*: 感謝使用量化系統，明日賽事排程將自動就緒！"
-                    )
-                    send_telegram(summary_msg)
-                    supabase.table("races").update({"summary_sent": True}).eq("id", last_race.get("id")).execute()
-                    print("今日賽事總結報表已成功發送！")
 
     except Exception as e:
         print(f"運行賽馬管線時發生錯誤: {e}")
