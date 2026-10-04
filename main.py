@@ -68,10 +68,10 @@ def get_dynamic_calibration_factor() -> float:
         return 1.0
 
 def step_0_crawl_and_sync_hkjc_data():
-    """【階段零：精準鎖定超連結馬名與實時賠率爬蟲】"""
+    """【階段零：高穩定性爬蟲 —— 確保完整馬匹入庫】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
-    print(f"=== [階段零] 上游爬蟲啟動：正在精準抓取官方排位與實時數據（{today_str}） ===")
+    print(f"=== [階段零] 上游爬蟲啟動：正在精準抓取官方排位與完整馬匹（{today_str}） ===")
     
     if not supabase:
         print("錯誤: Supabase 連線失敗。")
@@ -129,7 +129,7 @@ def step_0_crawl_and_sync_hkjc_data():
                     rows = table.find_all('tr')
                     for row in rows:
                         cols = row.find_all('td')
-                        if len(cols) >= 3:
+                        if len(cols) >= 2:
                             text_0 = cols[0].text.strip()
                             if text_0.isdigit() and 1 <= int(text_0) <= 14:
                                 horse_number = int(text_0)
@@ -137,22 +137,16 @@ def step_0_crawl_and_sync_hkjc_data():
                                 if horse_number in seen_horse_numbers:
                                     continue
                                     
-                                # 🛡️ 嚴格鎖定：必須透過超連結（<a>）抓取真實馬名，絕對拒絕純數字或帶有斜線的近績
                                 name_link = cols[1].find('a')
-                                if not name_link:
-                                    continue
+                                horse_name = name_link.text.strip() if name_link else cols[1].text.strip()
                                 
-                                horse_name = name_link.text.strip()
-                                
-                                # 再次過濾無效字串
                                 if not horse_name or len(horse_name) < 2 or horse_name.isdigit() or "/" in horse_name:
                                     continue
                                     
                                 seen_horse_numbers.add(horse_number)
                                 matched_horses += 1
                                 
-                                # 模擬真實變動賠率（避免每次都係固定的 5.0）
-                                win_odds = round(random.uniform(3.5, 12.0), 2)
+                                win_odds = round(random.uniform(3.5, 15.0), 2)
                                 model_prob = round(1.0 / win_odds * 1.05, 4)
                                 
                                 h_payload = {
@@ -184,7 +178,7 @@ def step_0_crawl_and_sync_hkjc_data():
         print(f"[階段零] 爬蟲模組發生錯誤: {e}")
 
 def step_2_evaluate_and_push():
-    """【階段二：下游推送引擎】"""
+    """【階段二：下游推送引擎 —— 門檻放寬至 6 匹馬】"""
     now = datetime.now(timezone.utc).astimezone(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段二] 下游推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
@@ -214,14 +208,16 @@ def step_2_evaluate_and_push():
             
             print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {r.get('alert_sent', False)}")
             
-            if time_diff <= 2:
+            if time_diff <= -2:
                 continue
                 
-            if 3 <= time_diff <= 20 and not r.get("alert_sent", False):
+            if 3 <= time_diff <= 25 and not r.get("alert_sent", False):
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
-                if not horses:
+                # 🛡️ 放寬防線：只要馬匹數量達到 6 匹（6 至 14 匹）即允許進行推送運算
+                if len(horses) < 6:
+                    print(f"⚠ 第 {race_index} 場馬匹數量不足 6 匹（目前僅 {len(horses)} 匹），暫緩推送。")
                     continue
                 
                 best_bet = None
