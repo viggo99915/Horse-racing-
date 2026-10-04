@@ -7,9 +7,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Install dependencies
-        run: pip install requests supabase
-      - name: Run main.py
+      - name: Install dependencie 
+        run: pip install requests supabase beautifulsoup4
+name: Run main.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
