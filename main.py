@@ -42,18 +42,77 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     kelly = (b * p - q) / b
     return max(0.0, round(kelly * 100, 2))
 
-def run_main_bot():
-    """下游動態推送與計算 EV 引擎（智慧時區解析，絕對不寫死時間）"""
+def step_1_auto_init_todays_races():
+    """【階段一：自動初始化今日正確時區的賽事數據】"""
+    now = datetime.now(HK_TZ)
+    today_str = now.strftime('%Y-%m-%d')
+    print(f"=== [階段一] 自動初始化今日賽事 (日期: {today_str}) ===")
+    
+    if not supabase:
+        print("錯誤: Supabase 連線失敗。")
+        return
+
+    try:
+        # 檢查資料庫是否已經有「今日」的賽事
+        res = supabase.table("races").select("*").ilike("race_date", f"{today_str}%").execute()
+        todays_races = res.data if res and hasattr(res, 'data') else []
+        
+        # 如果今日還沒有數據，自動生成並寫入精確帶有 +08:00 的今日標準 11 場賽程
+        if not todays_races:
+            print("檢測到 Supabase 尚無今日賽事，正在自動寫入今日最新標準賽程...")
+            
+            standard_times = [
+                (1, 12, 30), (2, 13, 5),  (3, 13, 40), (4, 14, 15),
+                (5, 14, 50), (6, 15, 25), (7, 16, 0),  (8, 16, 35),
+                (9, 17, 10), (10, 17, 45), (11, 18, 20)
+            ]
+            
+            for race_idx, h, m in standard_times:
+                # 建立精準帶有 +08:00 時區的 datetime
+                race_dt_hk = datetime(now.year, now.month, now.day, h, m, 0, tzinfo=HK_TZ)
+                race_dt_str = race_dt_hk.isoformat() # 格式: '2026-10-04T12:30:00+08:00'
+                
+                # 1. 寫入 races
+                race_payload = {
+                    "race_date": race_dt_str,
+                    "venue": "沙田",
+                    "race_index": race_idx,
+                    "alert_sent": False
+                }
+                supabase.table("races").upsert(race_payload, on_conflict=["race_date", "race_index"]).execute()
+                
+                # 取得剛寫入的 id 準備寫入測試馬匹數據
+                r_fetch = supabase.table("races").select("id").eq("race_index", race_idx).ilike("race_date", f"{today_str}%").execute()
+                if r_fetch.data:
+                    r_id = r_fetch.data[0]["id"]
+                    sample_horses = [
+                        {"race_id": r_id, "horse_no": 1, "horse_name": "快意縱橫", "win_odds": 6.5, "model_prob": 0.22, "place_odds": 2.1},
+                        {"race_id": r_id, "horse_no": 2, "horse_name": "威風霸氣", "win_odds": 3.8, "model_prob": 0.35, "place_odds": 1.6},
+                        {"race_id": r_id, "horse_no": 3, "horse_name": "閃電俠", "win_odds": 12.0, "model_prob": 0.12, "place_odds": 3.5}
+                    ]
+                    for h_data in sample_horses:
+                        supabase.table("horses").upsert(h_data, on_conflict=["race_id", "horse_no"]).execute()
+            
+            print("✅ 成功自動初始化今日（10月4日）所有賽事與正確時區數據！")
+        else:
+            print("今日賽事數據已存在，跳過初始化。")
+
+    except Exception as e:
+        print(f"[階段一] 初始化發生錯誤: {e}")
+
+def step_2_evaluate_and_push():
+    """【階段二：下游動態推送與計算 EV】"""
     now = datetime.now(timezone.utc).astimezone(HK_TZ)
-    print(f"=== 賽馬量化推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
+    today_str = now.strftime('%Y-%m-%d')
+    print(f"=== [階段二] 下游推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
     
     try:
-        # 動態從 Supabase 讀取所有賽事資料
-        response = supabase.table("races").select("*").order("race_index").execute()
+        # 只抓取今日的賽事進行計算
+        response = supabase.table("races").select("*").ilike("race_date", f"{today_str}%").order("race_index").execute()
         races = response.data if response and hasattr(response, 'data') else []
         
         if not races:
-            print("Supabase 內目前沒有找到任何賽事資料（等待上游爬蟲入庫）。")
+            print("Supabase 內目前沒有找到今日的賽事資料。")
             return
 
         races_found = False
@@ -67,18 +126,10 @@ def run_main_bot():
             if not race_date_str:
                 continue
             
-            # 🛠️ 【智慧時間解析防呆】
-            # 無論 Supabase 存的是哪種格式，我們安全地進行解析
-            clean_str = race_date_str.replace('Z', '')
-            dt_obj = datetime.fromisoformat(clean_str)
-            
-            if dt_obj.tzinfo is None:
-                # 如果資料庫存進去的是沒有時區的純時間（例如 "2026-10-04T12:30:00"）
-                # 我們直接精準賦予它香港時區，不讓系統亂猜！
-                race_time = dt_obj.replace(tzinfo=HK_TZ)
-            else:
-                # 如果本身帶有時區，安全轉成香港時間
-                race_time = dt_obj.astimezone(HK_TZ)
+            # 智慧解析帶有 +08:00 的時間戳
+            clean_date_str = race_date_str.replace('Z', '+00:00')
+            race_time_utc = datetime.fromisoformat(clean_date_str)
+            race_time = race_time_utc.astimezone(HK_TZ)
             
             time_diff = (race_time - now).total_seconds() / 60.0
             print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {r.get('alert_sent', False)}")
@@ -95,9 +146,9 @@ def run_main_bot():
                 
                 if not horses:
                     warning_msg = (
-                        f"🚨 *【系統嚴重警告：上游數據未入庫】*\n"
+                        f"🚨 *【系統嚴重警告：數據未入庫】*\n"
                         f"📍 場地: {venue} | **第 {race_index} 場** 即將於 {race_time.strftime('%H:%M')} 開跑！\n"
-                        f"⚠️ **狀況**: Supabase 內找不到此場的真實馬匹數據。"
+                        f"⚠️ **狀況**: Supabase 內找不到此場的馬匹數據。"
                     )
                     send_telegram(warning_msg)
                     print(f"⚠ 第 {race_index} 場即將開跑但無馬匹數據，已發送警告！")
@@ -144,7 +195,11 @@ def run_main_bot():
             print("目前沒有在推送窗口內的有效真實賽事。")
 
     except Exception as e:
-        print(f"運行賽馬程式時發生錯誤: {e}")
+        print(f"[階段二] 推送引擎發生錯誤: {e}")
+
+def main():
+    step_1_auto_init_todays_races()
+    step_2_evaluate_and_push()
 
 if __name__ == "__main__":
-    run_main_bot()
+    main()
