@@ -242,7 +242,7 @@ def step_2_evaluate_and_push():
                         continue
                     
                     ev = calibrated_prob * odds_win
-                    if ev > max_ev and ev > 1.05:
+                    if ev > max_ev and ev > 1.03:
                         max_ev = ev
                         kelly = calculate_kelly_stake(calibrated_prob, odds_win)
                         best_bet = {
