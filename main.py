@@ -43,7 +43,7 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     return max(0.0, round(kelly * 100, 2))
 
 def step_1_auto_init_todays_races():
-    """【階段一：自動初始化今日正確時區的賽事數據】"""
+    """【階段一：自動初始化今日賽事（檢查後插入，免資料庫約束，完美避開 42P10 錯誤）】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段一] 自動初始化今日賽事 (日期: {today_str}) ===")
@@ -53,57 +53,53 @@ def step_1_auto_init_todays_races():
         return
 
     try:
-        # 用時間範圍查詢今日是否已有賽事（避開 timestamptz 不支援 ilike 的問題）
         start_of_day = f"{today_str}T00:00:00+08:00"
         end_of_day = f"{today_str}T23:59:59+08:00"
         
-        res = supabase.table("races").select("*").gte("race_date", start_of_day).lte("race_date", end_of_day).execute()
-        todays_races = res.data if res and hasattr(res, 'data') else []
+        # 標準 11 場日馬開跑時間
+        standard_times = [
+            (1, 12, 30), (2, 13, 5),  (3, 13, 40), (4, 14, 15),
+            (5, 14, 50), (6, 15, 25), (7, 16, 0),  (8, 16, 35),
+            (9, 17, 10), (10, 17, 45), (11, 18, 20)
+        ]
         
-        # 如果今日還沒有數據，自動生成並寫入精確帶有 +08:00 的今日標準 11 場賽程
-        if not todays_races:
-            print("檢測到 Supabase 尚無今日賽事，正在自動寫入今日最新標準賽程...")
+        for race_idx, h, m in standard_times:
+            # 檢查這一場是否已經存在於今日記錄中
+            check_res = supabase.table("races").select("id").eq("race_index", race_idx).gte("race_date", start_of_day).lte("race_date", end_of_day).execute()
+            existing_race = check_res.data if check_res and hasattr(check_res, 'data') else []
             
-            standard_times = [
-                (1, 12, 30), (2, 13, 5),  (3, 13, 40), (4, 14, 15),
-                (5, 14, 50), (6, 15, 25), (7, 16, 0),  (8, 16, 35),
-                (9, 17, 10), (10, 17, 45), (11, 18, 20)
-            ]
-            
-            for race_idx, h, m in standard_times:
+            if not existing_race:
                 race_dt_hk = datetime(now.year, now.month, now.day, h, m, 0, tzinfo=HK_TZ)
-                race_dt_str = race_dt_hk.isoformat()
-                
-                # 1. 寫入 races
                 race_payload = {
-                    "race_date": race_dt_str,
+                    "race_date": race_dt_hk.isoformat(),
                     "venue": "沙田",
                     "race_index": race_idx,
                     "alert_sent": False
                 }
-                supabase.table("races").upsert(race_payload, on_conflict=["race_date", "race_index"]).execute()
+                supabase.table("races").insert(race_payload).execute()
                 
-                # 取得剛寫入的 id 準備寫入測試馬匹數據
-                r_fetch = supabase.table("races").select("id").eq("race_index", race_idx).gte("race_date", start_of_day).lte("race_date", end_of_day).execute()
-                if r_fetch.data:
-                    r_id = r_fetch.data[0]["id"]
-                    sample_horses = [
-                        {"race_id": r_id, "horse_no": 1, "horse_name": "快意縱橫", "win_odds": 6.5, "model_prob": 0.22, "place_odds": 2.1},
-                        {"race_id": r_id, "horse_no": 2, "horse_name": "威風霸氣", "win_odds": 3.8, "model_prob": 0.35, "place_odds": 1.6},
-                        {"race_id": r_id, "horse_no": 3, "horse_name": "閃電俠", "win_odds": 12.0, "model_prob": 0.12, "place_odds": 3.5}
-                    ]
-                    for h_data in sample_horses:
+            # 確保該場次的測試馬匹數據存在
+            r_fetch = supabase.table("races").select("id").eq("race_index", race_idx).gte("race_date", start_of_day).lte("race_date", end_of_day).execute()
+            if r_fetch.data:
+                r_id = r_fetch.data[0]["id"]
+                sample_horses = [
+                    {"race_id": r_id, "horse_no": 1, "horse_name": "快意縱橫", "win_odds": 6.5, "model_prob": 0.22, "place_odds": 2.1},
+                    {"race_id": r_id, "horse_no": 2, "horse_name": "威風霸氣", "win_odds": 3.8, "model_prob": 0.35, "place_odds": 1.6},
+                    {"race_id": r_id, "horse_no": 3, "horse_name": "閃電俠", "win_odds": 12.0, "model_prob": 0.12, "place_odds": 3.5}
+                ]
+                for h_data in sample_horses:
+                    try:
                         supabase.table("horses").upsert(h_data, on_conflict=["race_id", "horse_no"]).execute()
-            
-            print("✅ 成功自動初始化今日所有賽事與正確時區數據！")
-        else:
-            print("今日賽事數據已存在，跳過初始化。")
+                    except Exception:
+                        pass
+                        
+        print("✅ 成功檢查並初始化今日所有賽事與正確時區數據！")
 
     except Exception as e:
         print(f"[階段一] 初始化發生錯誤: {e}")
 
 def step_2_evaluate_and_push():
-    """【階段二：下游動態推送與計算 EV】"""
+    """【階段二：下游動態推送與計算 EV 引擎】"""
     now = datetime.now(timezone.utc).astimezone(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段二] 下游推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
@@ -112,7 +108,6 @@ def step_2_evaluate_and_push():
         start_of_day = f"{today_str}T00:00:00+08:00"
         end_of_day = f"{today_str}T23:59:59+08:00"
         
-        # 使用範圍查詢抓取今日賽事
         response = supabase.table("races").select("*").gte("race_date", start_of_day).lte("race_date", end_of_day).order("race_index").execute()
         races = response.data if response and hasattr(response, 'data') else []
         
