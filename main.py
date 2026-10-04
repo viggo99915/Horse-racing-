@@ -68,10 +68,10 @@ def get_dynamic_calibration_factor() -> float:
         return 1.0
 
 def step_0_crawl_and_sync_hkjc_data():
-    """【階段零：全方位精準爬蟲 —— 確保完整 6-14 匹真實馬名入庫】"""
+    """【階段零：智慧選表爬蟲 —— 自動鎖定包含最多馬匹的主表格】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
-    print(f"=== [階段零] 上游爬蟲啟動：正在精準抓取官方排位與完整馬匹（{today_str}） ===")
+    print(f"=== [階段零] 上游爬蟲啟動：正在智能抓取官方排位與完整馬匹（{today_str}） ===")
     
     if not supabase:
         print("錯誤: Supabase 連線失敗。")
@@ -80,7 +80,6 @@ def step_0_crawl_and_sync_hkjc_data():
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         
-        # 官方精準開跑時間對應表（特別修正第 10 場 17:20 及第 11 場 17:55）
         official_schedule = {
             1: (12, 30), 2: (13, 5),  3: (13, 40), 4: (14, 15), 
             5: (14, 50), 6: (15, 25), 7: (16, 0),  8: (16, 45), 
@@ -120,56 +119,61 @@ def step_0_crawl_and_sync_hkjc_data():
                     continue
                     
                 soup = BeautifulSoup(resp.text, 'html.parser')
+                tables = soup.find_all('table')
                 
-                # 遍歷所有表格列 tr，精準抓取馬號與超連結內的馬名
-                rows = soup.find_all('tr')
+                # 💡 智慧選表機制：遍歷所有表格，找出包含最多有效馬匹的那個主表格
+                best_horses_list = []
+                
+                for table in tables:
+                    rows = table.find_all('tr')
+                    current_table_horses = []
+                    seen_nums = set()
+                    
+                    for row in rows:
+                        cols = row.find_all('td')
+                        if len(cols) >= 2:
+                            text_0 = cols[0].text.strip()
+                            if text_0.isdigit() and 1 <= int(text_0) <= 14:
+                                horse_number = int(text_0)
+                                if horse_number in seen_nums:
+                                    continue
+                                
+                                name_link = cols[1].find('a')
+                                if not name_link:
+                                    continue
+                                
+                                horse_name = name_link.text.strip()
+                                if not horse_name or len(horse_name) < 2 or horse_name.isdigit() or "/" in horse_name:
+                                    continue
+                                
+                                seen_nums.add(horse_number)
+                                current_table_horses.append((horse_number, horse_name))
+                    
+                    # 如果這個表格找到的馬匹數量大於目前記錄，就更新為最佳目標（主出馬表通常擁有最多馬匹）
+                    if len(current_table_horses) > len(best_horses_list):
+                        best_horses_list = current_table_horses
+                
+                # 將篩選出來的完整馬匹資料寫入資料庫
                 matched_horses = 0
-                seen_horse_numbers = set()
-                
-                for row in rows:
-                    cols = row.find_all('td')
-                    if len(cols) >= 2:
-                        text_0 = cols[0].text.strip()
-                        if text_0.isdigit() and 1 <= int(text_0) <= 14:
-                            horse_number = int(text_0)
-                            
-                            if horse_number in seen_horse_numbers:
-                                continue
-                                
-                            # 強制鎖定 <a> 超連結內的馬名，防止抓到近績數字
-                            name_link = cols[1].find('a')
-                            if not name_link:
-                                continue
-                                
-                            horse_name = name_link.text.strip()
-                            
-                            # 嚴格過濾無效字串
-                            if not horse_name or len(horse_name) < 2 or horse_name.isdigit() or "/" in horse_name:
-                                continue
-                                
-                            seen_horse_numbers.add(horse_number)
-                            matched_horses += 1
-                            
-                            win_odds = round(random.uniform(3.5, 15.0), 2)
-                            model_prob = round(1.0 / win_odds * 1.05, 4)
-                            
-                            h_payload = {
-                                "race_id": race_id,
-                                "horse_number": horse_number,
-                                "horse_name": horse_name,
-                                "win_odds": win_odds,
-                                "place_odds": round(win_odds * 0.35 + 1.1, 2),
-                                "model_prob": model_prob
-                            }
-                            
-                            existing_h = supabase.table("horses").select("id").eq("race_id", race_id).eq("horse_number", horse_number).execute()
-                            if existing_h.data and len(existing_h.data) > 0:
-                                supabase.table("horses").update(h_payload).eq("race_id", race_id).eq("horse_number", horse_number).execute()
-                            else:
-                                supabase.table("horses").insert(h_payload).execute()
-                                
-                            if matched_horses >= 14:
-                                break
+                for horse_number, horse_name in best_horses_list:
+                    matched_horses += 1
+                    win_odds = round(random.uniform(3.5, 15.0), 2)
+                    model_prob = round(1.0 / win_odds * 1.05, 4)
+                    
+                    h_payload = {
+                        "race_id": race_id,
+                        "horse_number": horse_number,
+                        "horse_name": horse_name,
+                        "win_odds": win_odds,
+                        "place_odds": round(win_odds * 0.35 + 1.1, 2),
+                        "model_prob": model_prob
+                    }
+                    
+                    existing_h = supabase.table("horses").select("id").eq("race_id", race_id).eq("horse_number", horse_number).execute()
+                    if existing_h.data and len(existing_h.data) > 0:
+                        supabase.table("horses").update(h_payload).eq("race_id", race_id).eq("horse_number", horse_number).execute()
+                    else:
+                        supabase.table("horses").insert(h_payload).execute()
                                 
                 print(f"   第 {race_index} 場時間鎖定 ({race_dt_hk.strftime('%H:%M')}) 且成功精準入庫 {matched_horses} 匹真實馬匹資料。")
             except Exception as net_err:
@@ -180,7 +184,7 @@ def step_0_crawl_and_sync_hkjc_data():
         print(f"[階段零] 爬蟲模組發生錯誤: {e}")
 
 def step_2_evaluate_and_push():
-    """【階段二：下游推送引擎 —— 門檻 6-14 匹，支援測試發送】"""
+    """【階段二：下游推送引擎 —— 門檻 6-14 匹】"""
     now = datetime.now(timezone.utc).astimezone(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段二] 下游推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
@@ -213,12 +217,10 @@ def step_2_evaluate_and_push():
             if time_diff <= -2:
                 continue
                 
-            # 推送窗口：開跑前 3 到 25 分鐘內
             if 3 <= time_diff <= 25:
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
-                # 確保至少有 6 匹馬（6 至 14 匹）才允許進行計算與推送
                 if len(horses) < 6:
                     print(f"⚠ 第 {race_index} 場馬匹數量不足 6 匹（目前僅 {len(horses)} 匹），暫緩推送。")
                     continue
