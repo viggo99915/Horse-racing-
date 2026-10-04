@@ -67,7 +67,7 @@ def get_dynamic_calibration_factor() -> float:
         return 1.0
 
 def step_0_crawl_and_sync_hkjc_data():
-    """【階段零：高靈敏度真實排位爬蟲（帶 Debug 輸出）】"""
+    """【階段零：高靈敏度真實排位爬蟲（安全寫入模式）】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段零] 上游爬蟲啟動：正在抓取 HKJC 今日（{today_str}）排位數據 ===")
@@ -100,8 +100,6 @@ def step_0_crawl_and_sync_hkjc_data():
                 resp = requests.get(target_url, headers=headers, timeout=10)
                 if resp.status_code == 200:
                     soup = BeautifulSoup(resp.text, 'html.parser')
-                    
-                    # 💡 靈活策略：不限特定 class，尋找頁面中所有表格
                     tables = soup.find_all('table')
                     matched_horses = 0
                     
@@ -111,16 +109,14 @@ def step_0_crawl_and_sync_hkjc_data():
                             cols = row.find_all('td')
                             if len(cols) >= 2:
                                 text_0 = cols[0].text.strip()
-                                # 檢查第一欄是否為馬號 (1-14)
                                 if text_0.isdigit() and 1 <= int(text_0) <= 14:
                                     horse_no = int(text_0)
                                     horse_name = cols[1].text.strip()
                                     
-                                    # 若抓到的名稱太短或包含無關文字則跳過
                                     if len(horse_name) < 2:
                                         continue
                                         
-                                    win_odds = 5.0 # 排位預設賠率
+                                    win_odds = 5.0
                                     model_prob = round(1.0 / win_odds * 1.05, 4)
                                     
                                     h_payload = {
@@ -131,10 +127,17 @@ def step_0_crawl_and_sync_hkjc_data():
                                         "place_odds": round(win_odds * 0.35 + 1.1, 2),
                                         "model_prob": model_prob
                                     }
-                                    supabase.table("horses").upsert(h_payload, on_conflict=["race_id", "horse_no"]).execute()
+                                    
+                                    # 🛡️ 安全寫入：先檢查是否存在，存在則更新，否則插入
+                                    existing_h = supabase.table("horses").select("id").eq("race_id", race_id).eq("horse_no", horse_no).execute()
+                                    if existing_h.data and len(existing_h.data) > 0:
+                                        supabase.table("horses").update(h_payload).eq("race_id", race_id).eq("horse_no", horse_no).execute()
+                                    else:
+                                        supabase.table("horses").insert(h_payload).execute()
+                                        
                                     matched_horses += 1
                                     
-                    print(f"   第 {race_index} 場成功解析並入庫 {matched_horses} 匹馬匹資料。")
+                    print(f"   第 {race_index} 場成功解析並安全入庫 {matched_horses} 匹馬匹資料。")
                 else:
                     print(f"   第 {race_index} 場請求失敗，狀態碼: {resp.status_code}")
             except Exception as net_err:
@@ -308,7 +311,7 @@ def step_3_settle_and_report():
         print(f"[階段三] 結算發生錯誤: {e}")
 
 def main():
-    step_0_crawl_and_sync_hkjc_data()  # 0. 抓取真實排位數據並入庫
+    step_0_crawl_and_sync_hkjc_data()  # 0. 抓取真實排位數據並安全入庫
     step_1_auto_init_todays_races()    # 1. 初始化賽程框架
     step_2_evaluate_and_push()         # 2. 評估真實資料並發送 EV 推送
     step_3_settle_and_report()         # 3. 賽後真實結算
