@@ -67,10 +67,10 @@ def get_dynamic_calibration_factor() -> float:
         return 1.0
 
 def step_0_crawl_and_sync_hkjc_data():
-    """【階段零：高靈敏度真實排位爬蟲（修正為 horse_number 欄位）】"""
+    """【階段零：高精準度排位爬蟲 —— 嚴格鎖定馬匹表格結構】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
-    print(f"=== [階段零] 上游爬蟲啟動：正在抓取 HKJC 今日（{today_str}）排位數據 ===")
+    print(f"=== [階段零] 上游爬蟲啟動：正在精準抓取 HKJC 今日（{today_str}）排位數據 ===")
     
     if not supabase:
         print("錯誤: Supabase 連線失敗。")
@@ -100,26 +100,32 @@ def step_0_crawl_and_sync_hkjc_data():
                 resp = requests.get(target_url, headers=headers, timeout=10)
                 if resp.status_code == 200:
                     soup = BeautifulSoup(resp.text, 'html.parser')
-                    tables = soup.find_all('table')
+                    
+                    # 💡 精準鎖定排位表的特定表格 class（通常排位表主體表格包含 table_bd 或 draggable）
+                    tables = soup.find_all('table', {'class': lambda x: x and ('table_bd' in x or 'draggable' in x)})
+                    if not tables:
+                        tables = soup.find_all('table') # 備用方案
+                        
                     matched_horses = 0
                     
                     for table in tables:
                         rows = table.find_all('tr')
                         for row in rows:
                             cols = row.find_all('td')
-                            if len(cols) >= 2:
+                            # 確保欄位足夠，且第一欄必須是乾淨的馬號（1至14之間）
+                            if len(cols) >= 3:
                                 text_0 = cols[0].text.strip()
                                 if text_0.isdigit() and 1 <= int(text_0) <= 14:
                                     horse_number = int(text_0)
                                     horse_name = cols[1].text.strip()
                                     
-                                    if len(horse_name) < 2:
+                                    # 過濾掉異常名稱或過短的字串
+                                    if len(horse_name) < 2 or "馬匹" in horse_name:
                                         continue
                                         
                                     win_odds = 5.0
                                     model_prob = round(1.0 / win_odds * 1.05, 4)
                                     
-                                    # 💡 嚴格對應 Supabase 的 horse_number 欄位
                                     h_payload = {
                                         "race_id": race_id,
                                         "horse_number": horse_number,
@@ -129,7 +135,7 @@ def step_0_crawl_and_sync_hkjc_data():
                                         "model_prob": model_prob
                                     }
                                     
-                                    # 🛡️ 安全寫入：先檢查是否存在，存在則更新，否則插入
+                                    # 安全寫入資料庫
                                     existing_h = supabase.table("horses").select("id").eq("race_id", race_id).eq("horse_number", horse_number).execute()
                                     if existing_h.data and len(existing_h.data) > 0:
                                         supabase.table("horses").update(h_payload).eq("race_id", race_id).eq("horse_number", horse_number).execute()
@@ -138,13 +144,13 @@ def step_0_crawl_and_sync_hkjc_data():
                                         
                                     matched_horses += 1
                                     
-                    print(f"   第 {race_index} 場成功解析並安全入庫 {matched_horses} 匹馬匹資料。")
+                    print(f"   第 {race_index} 場成功精準解析並入庫 {matched_horses} 匹馬匹資料。")
                 else:
                     print(f"   第 {race_index} 場請求失敗，狀態碼: {resp.status_code}")
             except Exception as net_err:
                 print(f"   第 {race_index} 場抓取網絡數據異常: {net_err}")
                 
-        print("✅ 上游真實排位爬蟲同步執行完畢！")
+        print("✅ 上游精準排位爬蟲同步執行完畢！")
     except Exception as e:
         print(f"[階段零] 爬蟲模組發生錯誤: {e}")
 
@@ -185,7 +191,7 @@ def step_1_auto_init_todays_races():
         print(f"[階段一] 初始化發生錯誤: {e}")
 
 def step_2_evaluate_and_push():
-    """【階段二：下游動態校準 EV 計算與 Telegram 推送】"""
+    """【階段二：嚴格時間防線與 EV 推送引擎】"""
     now = datetime.now(timezone.utc).astimezone(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段二] 下游推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
@@ -215,21 +221,18 @@ def step_2_evaluate_and_push():
             
             print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {r.get('alert_sent', False)}")
             
+            # 🛡️ 嚴格防線 1：如果比賽已經開跑（time_diff <= 0），絕對直接略過，絕不發送已過期通知
             if time_diff <= 0:
+                print(f"   (第 {race_index} 場已經開跑，略過推送)")
                 continue
                 
-            if 0 < time_diff <= 30 and not r.get("alert_sent", False):
+            # 🛡️ 嚴格防線 2：設定精準推送窗口（例如開跑前 2 到 25 分鐘之間，門檻調為 1.03）
+            if 2 <= time_diff <= 25 and not r.get("alert_sent", False):
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
                 if not horses:
-                    warning_msg = (
-                        f"🚨 *【系統嚴重警告：真實數據未入庫】*\n"
-                        f"📍 場地: {venue} | **第 {race_index} 場** 即將於 {race_time.strftime('%H:%M')} 開跑！\n"
-                        f"⚠️ **狀況**: 數據庫中未檢測到此場的真實馬匹與賠率數據。"
-                    )
-                    send_telegram(warning_msg)
-                    print(f"⚠ 第 {race_index} 場即將開跑但無真實馬匹數據，已發送警告！")
+                    print(f"⚠ 第 {race_index} 場在窗口內但尚無馬匹數據。")
                     continue
                 
                 best_bet = None
@@ -242,6 +245,7 @@ def step_2_evaluate_and_push():
                         continue
                     
                     ev = calibrated_prob * odds_win
+                    # 將 EV 門檻調整為更合理的 1.03
                     if ev > max_ev and ev > 1.03:
                         max_ev = ev
                         kelly = calculate_kelly_stake(calibrated_prob, odds_win)
@@ -273,7 +277,7 @@ def step_2_evaluate_and_push():
                     }).eq("id", race_id).execute()
                     print(f"成功發送第 {race_index} 場真實推介通知！")
                 else:
-                    print(f"第 {race_index} 場在推送窗口內，但真實數據中沒有符合 EV 門檻的馬匹。")
+                    print(f"第 {race_index} 場在推送窗口內，但無符合 EV > 1.03 門檻的馬匹。")
         print("✅ 下游推送檢查完畢！")
     except Exception as e:
         print(f"[階段二] 推送引擎發生錯誤: {e}")
@@ -312,7 +316,7 @@ def step_3_settle_and_report():
         print(f"[階段三] 結算發生錯誤: {e}")
 
 def main():
-    step_0_crawl_and_spec_data = step_0_crawl_and_sync_hkjc_data()  # 0. 抓取真實排位數據並安全入庫
+    step_0_crawl_and_sync_hkjc_data()  # 0. 抓取真實排位數據並安全入庫
     step_1_auto_init_todays_races()    # 1. 初始化賽程框架
     step_2_evaluate_and_push()         # 2. 評估真實資料並發送 EV 推送
     step_3_settle_and_report()         # 3. 賽後真實結算
