@@ -30,4 +30,4 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          python crawler.py  # 請換成你實際的上游爬蟲主程式檔名
+          python main.py  
