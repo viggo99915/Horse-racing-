@@ -43,10 +43,10 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     return max(0.0, round(kelly * 100, 2))
 
 def step_1_auto_init_todays_races():
-    """【階段一：自動初始化今日賽事（檢查後插入，免資料庫約束，完美避開 42P10 錯誤）】"""
+    """【階段一：僅自動初始化今日賽程框架，絕對不寫入任何虛假馬匹數據】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
-    print(f"=== [階段一] 自動初始化今日賽事 (日期: {today_str}) ===")
+    print(f"=== [階段一] 自動初始化今日賽程框架 (日期: {today_str}) ===")
     
     if not supabase:
         print("錯誤: Supabase 連線失敗。")
@@ -56,7 +56,7 @@ def step_1_auto_init_todays_races():
         start_of_day = f"{today_str}T00:00:00+08:00"
         end_of_day = f"{today_str}T23:59:59+08:00"
         
-        # 標準 11 場日馬開跑時間
+        # 標準 11 場日馬開跑時間框架
         standard_times = [
             (1, 12, 30), (2, 13, 5),  (3, 13, 40), (4, 14, 15),
             (5, 14, 50), (6, 15, 25), (7, 16, 0),  (8, 16, 35),
@@ -64,10 +64,11 @@ def step_1_auto_init_todays_races():
         ]
         
         for race_idx, h, m in standard_times:
-            # 檢查這一場是否已經存在於今日記錄中
+            # 檢查這一場的賽程框架是否已經存在
             check_res = supabase.table("races").select("id").eq("race_index", race_idx).gte("race_date", start_of_day).lte("race_date", end_of_day).execute()
             existing_race = check_res.data if check_res and hasattr(check_res, 'data') else []
             
+            # 如果不存在，才寫入賽程框架（保持數據純淨，等待你的真實爬蟲入庫）
             if not existing_race:
                 race_dt_hk = datetime(now.year, now.month, now.day, h, m, 0, tzinfo=HK_TZ)
                 race_payload = {
@@ -77,23 +78,8 @@ def step_1_auto_init_todays_races():
                     "alert_sent": False
                 }
                 supabase.table("races").insert(race_payload).execute()
-                
-            # 確保該場次的測試馬匹數據存在
-            r_fetch = supabase.table("races").select("id").eq("race_index", race_idx).gte("race_date", start_of_day).lte("race_date", end_of_day).execute()
-            if r_fetch.data:
-                r_id = r_fetch.data[0]["id"]
-                sample_horses = [
-                    {"race_id": r_id, "horse_no": 1, "horse_name": "快意縱橫", "win_odds": 6.5, "model_prob": 0.22, "place_odds": 2.1},
-                    {"race_id": r_id, "horse_no": 2, "horse_name": "威風霸氣", "win_odds": 3.8, "model_prob": 0.35, "place_odds": 1.6},
-                    {"race_id": r_id, "horse_no": 3, "horse_name": "閃電俠", "win_odds": 12.0, "model_prob": 0.12, "place_odds": 3.5}
-                ]
-                for h_data in sample_horses:
-                    try:
-                        supabase.table("horses").upsert(h_data, on_conflict=["race_id", "horse_no"]).execute()
-                    except Exception:
-                        pass
                         
-        print("✅ 成功檢查並初始化今日所有賽事與正確時區數據！")
+        print("✅ 今日賽程框架檢查完畢（數據保持 100% 純淨，無任何虛假資料）！")
 
     except Exception as e:
         print(f"[階段一] 初始化發生錯誤: {e}")
@@ -140,23 +126,24 @@ def step_2_evaluate_and_push():
             if 0 < time_diff <= 30 and not r.get("alert_sent", False):
                 races_found = True
                 
+                # 檢查資料庫中是否有該場次的真實馬匹與賠率數據
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
                 if not horses:
                     warning_msg = (
-                        f"🚨 *【系統嚴重警告：數據未入庫】*\n"
+                        f"🚨 *【系統嚴重警告：真實數據未入庫】*\n"
                         f"📍 場地: {venue} | **第 {race_index} 場** 即將於 {race_time.strftime('%H:%M')} 開跑！\n"
-                        f"⚠️ **狀況**: Supabase 內找不到此場的馬匹數據。"
+                        f"⚠️ **狀況**: 數據庫中找不到此場的真實馬匹與賠率數據。"
                     )
                     send_telegram(warning_msg)
-                    print(f"⚠ 第 {race_index} 場即將開跑但無馬匹數據，已發送警告！")
+                    print(f"⚠ 第 {race_index} 場即將開跑但無真實馬匹數據，已發送警告！")
                     continue
                 
                 best_bet = None
                 max_ev = 0
                 for h in horses:
-                    model_prob = float(h.get("model_prob", 0.25))
+                    model_prob = float(h.get("model_prob", 0))
                     odds_win = float(h.get("win_odds", 0))
                     if odds_win <= 1:
                         continue
@@ -188,7 +175,7 @@ def step_2_evaluate_and_push():
                     supabase.table("races").update({"alert_sent": True}).eq("id", race_id).execute()
                     print(f"成功發送第 {race_index} 場推介通知！")
                 else:
-                    print(f"第 {race_index} 場在推送窗口內，但沒有符合 EV 門檻的馬匹。")
+                    print(f"第 {race_index} 場在推送窗口內，但真實數據中沒有符合 EV 門檻的馬匹。")
 
         if not races_found:
             print("目前沒有在推送窗口內的有效真實賽事。")
