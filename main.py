@@ -67,10 +67,10 @@ def get_dynamic_calibration_factor() -> float:
         return 1.0
 
 def step_0_crawl_and_sync_hkjc_data():
-    """【階段零：高精準度排位爬蟲 —— 鎖定真實馬名與官方開跑時間】"""
+    """【階段零：高精準度動態時間與馬匹爬蟲】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
-    print(f"=== [階段零] 上游爬蟲啟動：正在精準抓取 HKJC 今日（{today_str}）排位與時間 ===")
+    print(f"=== [階段零] 上游爬蟲啟動：正在動態抓取 HKJC 今日（{today_str}）官方時間與馬匹 ===")
     
     if not supabase:
         print("錯誤: Supabase 連線失敗。")
@@ -79,7 +79,7 @@ def step_0_crawl_and_sync_hkjc_data():
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         
-        # 總共 11 場賽事逐一抓取並更新時間與馬匹
+        # 假設今日有 11 場賽事
         for race_index in range(1, 12):
             target_url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/RaceCard.aspx?RaceDate={today_str.replace('-', '/')}&RaceNo={race_index}"
             
@@ -88,25 +88,39 @@ def step_0_crawl_and_sync_hkjc_data():
                 if resp.status_code == 200:
                     soup = BeautifulSoup(resp.text, 'html.parser')
                     
-                    # 1. 嘗試從頁面抓取官方真實開跑時間（例如尋找包含時間格式的標籤或標題）
-                    # 若抓不到則使用預設標準時間
-                    official_time_str = None
-                    time_tag = soup.find(text=lambda t: t and '開跑時間' in t or t and ':' in t and len(t.strip()) <= 5)
+                    # 💡 動態解析官方開跑時間（從網頁標題或時間標籤中提取，例如 "16:45"）
+                    race_dt_hk = None
+                    page_text = soup.get_text()
                     
-                    # 建立或更新 races 表格中的賽事時間
+                    # 嘗試從網頁中尋找符合 HH:MM 格式的時間字串作為開跑時間
+                    import re
+                    # 尋找類似 "16:45" 或包含開跑時間附近的特徵
+                    time_matches = re.findall(r'(\d{2}):(\d{2})', page_text)
+                    
+                    # 如果找不到網頁官方動態時間，則使用備用的合理順延時間（每場相隔約35-40分鐘）
+                    # 基準：第1場 12:30, 第2場 13:05, 第3場 13:40, 第4場 14:15, 第5場 14:50, 第6場 15:25, 第7場 16:00, 第8場 16:45, 第9場 17:10, 第10場 17:45, 第11場 18:20
+                    fallback_schedule = {
+                        1: (12, 30), 2: (13, 5), 3: (13, 40), 4: (14, 15), 5: (14, 50),
+                        6: (15, 25), 7: (16, 0), 8: (16, 45), 9: (17, 10), 10: (17, 45), 11: (18, 20)
+                    }
+                    
+                    h_val, m_val = fallback_schedule.get(race_index, (12, 30))
+                    
+                    # 嘗試更精準捕捉網頁上的官方開跑時間
+                    for line in page_text.split('\n'):
+                        if '開跑時間' in line or '場次' in line:
+                            found = re.search(r'(\d{1,2}):(\d{2})', line)
+                            if found:
+                                h_val, m_val = int(found.group(1)), int(found.group(2))
+                                break
+
+                    race_dt_hk = datetime(now.year, now.month, now.day, h_val, m_val, 0, tzinfo=HK_TZ)
+
                     start_of_day = f"{today_str}T00:00:00+08:00"
                     end_of_day = f"{today_str}T23:59:59+08:00"
                     
                     r_res = supabase.table("races").select("id").eq("race_index", race_index).gte("race_date", start_of_day).lte("race_date", end_of_day).execute()
                     races_data = r_res.data if r_res and hasattr(r_res, 'data') else []
-                    
-                    # 預設每場相隔 35 分鐘的標準對應表（確保時間準確）
-                    default_hours = [12, 13, 13, 14, 14, 15, 16, 16, 17, 17, 18]
-                    default_mins = [30, 5, 40, 15, 50, 25, 0, 45, 10, 45, 20] # 第8場對應 16:45
-                    
-                    h_val = default_hours[race_index - 1]
-                    m_val = default_mins[race_index - 1]
-                    race_dt_hk = datetime(now.year, now.month, now.day, h_val, m_val, 0, tzinfo=HK_TZ)
                     
                     race_payload = {
                         "race_date": race_dt_hk.isoformat(),
@@ -120,13 +134,12 @@ def step_0_crawl_and_sync_hkjc_data():
                         race_id = ins_res.data[0]["id"] if ins_res.data else None
                     else:
                         race_id = races_data[0]["id"]
-                        # 更新為官方對應的正確開跑時間
                         supabase.table("races").update({"race_date": race_dt_hk.isoformat()}).eq("id", race_id).execute()
 
                     if not race_id:
                         continue
 
-                    # 2. 精準解析馬匹表格：確保馬名不含斜線或數字串，必須是純中文字/英文馬名
+                    # 💡 精準解析馬匹：放寬條件，確保所有真實出賽馬匹完整入庫
                     tables = soup.find_all('table')
                     matched_horses = 0
                     
@@ -140,8 +153,8 @@ def step_0_crawl_and_sync_hkjc_data():
                                     horse_number = int(text_0)
                                     horse_name = cols[1].text.strip()
                                     
-                                    # 🛡️ 嚴格過濾：如果馬名包含 "/" 或者長度小於 2，或者包含非馬名字眼，直接跳過！
-                                    if "/" in horse_name or len(horse_name) < 2 or horse_name.isdigit():
+                                    # 🛡️ 寬鬆但安全的馬名過濾：只排除明顯錯誤的字串
+                                    if not horse_name or len(horse_name) < 2 or horse_name.isdigit() or "賠率" in horse_name:
                                         continue
                                         
                                     win_odds = 5.0
@@ -164,20 +177,16 @@ def step_0_crawl_and_sync_hkjc_data():
                                         
                                     matched_horses += 1
                                     
-                    print(f"   第 {race_index} 場時間對齊並成功入庫 {matched_horses} 匹真實馬匹資料。")
+                    print(f"   第 {race_index} 場時間同步 ({race_dt_hk.strftime('%H:%M')}) 且成功入庫 {matched_horses} 匹馬匹資料。")
             except Exception as net_err:
                 print(f"   第 {race_index} 場抓取網絡數據異常: {net_err}")
                 
-        print("✅ 上游精準排位與時間同步執行完畢！")
+        print("✅ 上游動態時間與馬匹爬蟲同步執行完畢！")
     except Exception as e:
         print(f"[階段零] 爬蟲模組發生錯誤: {e}")
 
-def step_1_auto_init_todays_races():
-    """【階段一：框架已在階段零同步處理，此處保持相容】"""
-    pass
-
 def step_2_evaluate_and_push():
-    """【階段二：嚴格時間防線與 EV 推送引擎】"""
+    """【階段二：下游推送引擎】"""
     now = datetime.now(timezone.utc).astimezone(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段二] 下游推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
@@ -207,11 +216,9 @@ def step_2_evaluate_and_push():
             
             print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {r.get('alert_sent', False)}")
             
-            # 如果已經開跑或距離開跑小於 2 分鐘，直接略過
             if time_diff <= 2:
                 continue
                 
-            # 推送窗口：開跑前 3 到 20 分鐘內
             if 3 <= time_diff <= 20 and not r.get("alert_sent", False):
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
@@ -264,7 +271,7 @@ def step_2_evaluate_and_push():
         print(f"[階段二] 推送引擎發生錯誤: {e}")
 
 def step_3_settle_and_report():
-    """【階段三：賽後真實結算與命中率統計】"""
+    """【階段三：賽後真實結算】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段三] 賽後結算與歷史命中率統計啟動 ===")
@@ -288,7 +295,7 @@ def step_3_settle_and_report():
             if alert_sent and not is_settled:
                 target_url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/LocalResults.aspx?RaceDate={today_str.replace('-', '/')}&RaceNo={race_index}"
                 resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-                if resp.status_group == 200 or resp.status_code == 200:
+                if resp.status_code == 200:
                     supabase.table("races").update({"settled": True}).eq("id", race_id).execute()
                     
         print("✅ 賽後真實結算執行完畢！")
@@ -296,7 +303,7 @@ def step_3_settle_and_report():
         print(f"[階段三] 結算發生錯誤: {e}")
 
 def main():
-    step_0_crawl_and_sync_hkjc_data()  # 0. 同步真實開跑時間與精準馬名
+    step_0_crawl_and_sync_hkjc_data()  # 0. 同步真實開跑時間與完整馬名
     step_2_evaluate_and_push()         # 2. 執行時間過濾與 EV 推送
     step_3_settle_and_report()         # 3. 賽後結算
 
