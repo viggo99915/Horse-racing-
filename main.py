@@ -68,10 +68,10 @@ def get_dynamic_calibration_factor() -> float:
         return 1.0
 
 def step_0_crawl_and_sync_hkjc_data():
-    """【階段零：動態官方時間抓取 + 10-14 匹完整馬匹精準入庫】"""
+    """【階段零：動態官方時間抓取 + 透過超連結精準鎖定真實馬名入庫】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
-    print(f"=== [階段零] 上游爬蟲啟動：正在動態同步官方時間與完整馬匹（{today_str}） ===")
+    print(f"=== [階段零] 上游爬蟲啟動：正在動態同步官方時間與精準馬名（{today_str}） ===")
     
     if not supabase:
         print("錯誤: Supabase 連線失敗。")
@@ -80,7 +80,6 @@ def step_0_crawl_and_sync_hkjc_data():
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         
-        # 假設今日賽事最多 11 場
         for race_index in range(1, 12):
             target_url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/RaceCard.aspx?RaceDate={today_str.replace('-', '/')}&RaceNo={race_index}"
             
@@ -92,9 +91,7 @@ def step_0_crawl_and_sync_hkjc_data():
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 page_text = soup.get_text()
                 
-                # 💡 動態捕捉官方開跑時間（從網頁內容中尋找時間特徵）
                 h_val, m_val = 12, 30
-                # 備用保底時間對應表（若網頁無法直接匹配時使用）
                 fallback_schedule = {
                     1: (12, 30), 2: (13, 5),  3: (13, 40), 4: (14, 15), 
                     5: (14, 50), 6: (15, 25), 7: (16, 0),  8: (16, 45), 
@@ -103,7 +100,6 @@ def step_0_crawl_and_sync_hkjc_data():
                 if race_index in fallback_schedule:
                     h_val, m_val = fallback_schedule[race_index]
                 
-                # 嘗試從網頁文字中透過 Regex 抓取實際開跑時間
                 time_patterns = re.findall(r'(?:開跑時間|時間)[:：]?\s*(\d{1,2}):(\d{2})', page_text)
                 if time_patterns:
                     h_val, m_val = int(time_patterns[0][0]), int(time_patterns[0][1])
@@ -133,7 +129,7 @@ def step_0_crawl_and_sync_hkjc_data():
                 if not race_id:
                     continue
 
-                # 💡 精準解析馬匹：使用集合防重與寬鬆過濾，確保 10-14 匹馬完美入庫
+                # 💡 精準解析馬匹：強制鎖定 <a> 標籤內的正統馬名，杜絕近績數字
                 tables = soup.find_all('table')
                 matched_horses = 0
                 seen_horse_numbers = set()
@@ -150,10 +146,15 @@ def step_0_crawl_and_sync_hkjc_data():
                                 if horse_number in seen_horse_numbers:
                                     continue
                                     
-                                horse_name = cols[1].text.strip()
+                                # 🛡️ 核心修復：優先尋找儲存格內的 <a> 標籤（官方馬名鏈結）
+                                name_link = cols[1].find('a')
+                                if name_link:
+                                    horse_name = name_link.text.strip()
+                                else:
+                                    horse_name = cols[1].text.strip()
                                 
-                                # 寬鬆安全過濾：只排除空白或純數字
-                                if not horse_name or len(horse_name) < 2 or horse_name.isdigit():
+                                # 🛡️ 雙重嚴格過濾：排除空值、過短字串、純數字及含有斜線的近績
+                                if not horse_name or len(horse_name) < 2 or horse_name.isdigit() or "/" in horse_name:
                                     continue
                                     
                                 seen_horse_numbers.add(horse_number)
@@ -182,11 +183,11 @@ def step_0_crawl_and_sync_hkjc_data():
                     if matched_horses >= 14:
                         break
                                 
-                print(f"   第 {race_index} 場時間同步 ({race_dt_hk.strftime('%H:%M')}) 且成功入庫 {matched_horses} 匹馬匹資料。")
+                print(f"   第 {race_index} 場時間同步 ({race_dt_hk.strftime('%H:%M')}) 且成功精準入庫 {matched_horses} 匹真實馬匹資料。")
             except Exception as net_err:
                 print(f"   第 {race_index} 場抓取網絡數據異常: {net_err}")
                 
-        print("✅ 上游動態時間與馬匹爬蟲同步執行完畢！")
+        print("✅ 上游動態時間與精準馬名爬蟲同步執行完畢！")
     except Exception as e:
         print(f"[階段零] 爬蟲模組發生錯誤: {e}")
 
@@ -308,7 +309,7 @@ def step_3_settle_and_report():
         print(f"[階段三] 結算發生錯誤: {e}")
 
 def main():
-    step_0_crawl_and_sync_hkjc_data()  # 0. 動態官方時間與完整 10-14 匹馬入庫
+    step_0_crawl_and_sync_hkjc_data()  # 0. 動態官方時間與精準超連結馬名入庫
     step_2_evaluate_and_push()         # 2. 推送引擎
     step_3_settle_and_report()         # 3. 賽後結算
 
