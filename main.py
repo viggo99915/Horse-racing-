@@ -67,7 +67,7 @@ def get_dynamic_calibration_factor() -> float:
         return 1.0
 
 def step_0_crawl_and_sync_hkjc_data():
-    """【階段零：高靈敏度真實排位爬蟲（安全寫入模式）】"""
+    """【階段零：高靈敏度真實排位爬蟲（修正為 horse_number 欄位）】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段零] 上游爬蟲啟動：正在抓取 HKJC 今日（{today_str}）排位數據 ===")
@@ -110,7 +110,7 @@ def step_0_crawl_and_sync_hkjc_data():
                             if len(cols) >= 2:
                                 text_0 = cols[0].text.strip()
                                 if text_0.isdigit() and 1 <= int(text_0) <= 14:
-                                    horse_no = int(text_0)
+                                    horse_number = int(text_0)
                                     horse_name = cols[1].text.strip()
                                     
                                     if len(horse_name) < 2:
@@ -119,9 +119,10 @@ def step_0_crawl_and_sync_hkjc_data():
                                     win_odds = 5.0
                                     model_prob = round(1.0 / win_odds * 1.05, 4)
                                     
+                                    # 💡 嚴格對應 Supabase 的 horse_number 欄位
                                     h_payload = {
                                         "race_id": race_id,
-                                        "horse_no": horse_no,
+                                        "horse_number": horse_number,
                                         "horse_name": horse_name,
                                         "win_odds": win_odds,
                                         "place_odds": round(win_odds * 0.35 + 1.1, 2),
@@ -129,9 +130,9 @@ def step_0_crawl_and_sync_hkjc_data():
                                     }
                                     
                                     # 🛡️ 安全寫入：先檢查是否存在，存在則更新，否則插入
-                                    existing_h = supabase.table("horses").select("id").eq("race_id", race_id).eq("horse_no", horse_no).execute()
+                                    existing_h = supabase.table("horses").select("id").eq("race_id", race_id).eq("horse_number", horse_number).execute()
                                     if existing_h.data and len(existing_h.data) > 0:
-                                        supabase.table("horses").update(h_payload).eq("race_id", race_id).eq("horse_no", horse_no).execute()
+                                        supabase.table("horses").update(h_payload).eq("race_id", race_id).eq("horse_number", horse_number).execute()
                                     else:
                                         supabase.table("horses").insert(h_payload).execute()
                                         
@@ -245,7 +246,7 @@ def step_2_evaluate_and_push():
                         max_ev = ev
                         kelly = calculate_kelly_stake(calibrated_prob, odds_win)
                         best_bet = {
-                            "horse_no": h.get("horse_no"),
+                            "horse_number": h.get("horse_number"),
                             "horse_name": h.get("horse_name"),
                             "win_prob": calibrated_prob,
                             "odds_win": odds_win,
@@ -258,7 +259,7 @@ def step_2_evaluate_and_push():
                     msg = (
                         f"🔥 *【香港賽馬全自動量化系統｜第 {race_index} 場心水推介】*\n"
                         f"📍 場地: {venue} | 開跑時間: {race_time.strftime('%H:%M')}\n\n"
-                        f"🐎 *精選重心*: **#{best_bet['horse_no']} {best_bet['horse_name']}**\n"
+                        f"🐎 *精選重心*: **#{best_bet['horse_number']} {best_bet['horse_name']}**\n"
                         f"📊 校準預測勝率: {best_bet['win_prob']*100:.1f}%\n\n"
                         f"💰 *建議投注方案*:\n"
                         f"• **獨贏 (WIN)**: 賠率 {best_bet['odds_win']} | 期望值 EV: {best_bet['ev']:.2f} | 凱利建議: {best_bet['kelly']}%\n"
@@ -267,7 +268,7 @@ def step_2_evaluate_and_push():
                     send_telegram(msg)
                     supabase.table("races").update({
                         "alert_sent": True,
-                        "recommended_horse": best_bet['horse_no'],
+                        "recommended_horse": best_bet['horse_number'],
                         "model_prob": best_bet['win_prob']
                     }).eq("id", race_id).execute()
                     print(f"成功發送第 {race_index} 場真實推介通知！")
@@ -311,7 +312,7 @@ def step_3_settle_and_report():
         print(f"[階段三] 結算發生錯誤: {e}")
 
 def main():
-    step_0_crawl_and_sync_hkjc_data()  # 0. 抓取真實排位數據並安全入庫
+    step_0_crawl_and_spec_data = step_0_crawl_and_sync_hkjc_data()  # 0. 抓取真實排位數據並安全入庫
     step_1_auto_init_todays_races()    # 1. 初始化賽程框架
     step_2_evaluate_and_push()         # 2. 評估真實資料並發送 EV 推送
     step_3_settle_and_report()         # 3. 賽後真實結算
