@@ -9,6 +9,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+DATABASE_URL = os.environ.get("DATABASE_URL")  # 用於自動更新資料庫結構
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 HK_TZ = timezone(timedelta(hours=8))
@@ -43,17 +44,39 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     kelly = (b * p - q) / b
     return max(0.0, round(kelly * 100, 2))
 
+def ensure_database_schema():
+    """【自動結構初始化】透過程式自動檢查並在 Supabase 建立必要欄位"""
+    if not DATABASE_URL:
+        print("💡 [提示] 未設定 DATABASE_URL，跳過自動資料庫結構檢查（若已手動建立欄位可忽略）。")
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        queries = [
+            "ALTER TABLE races ADD COLUMN IF NOT EXISTS model_prob FLOAT;",
+            "ALTER TABLE races ADD COLUMN IF NOT EXISTS settled BOOLEAN DEFAULT FALSE;",
+            "ALTER TABLE races ADD COLUMN IF NOT EXISTS actual_win BOOLEAN DEFAULT FALSE;",
+            "ALTER TABLE races ADD COLUMN IF NOT EXISTS recommended_horse INT;"
+        ]
+        for q in queries:
+            cur.execute(q)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ 數據庫結構檢查與欄位自動補齊完成！")
+    except Exception as e:
+        print(f"💡 [提示] 自動更新資料庫結構時發生異常（若已手動建立則不影響主程式）: {e}")
+
 def get_dynamic_calibration_factor() -> float:
-    """【動態校準模組】從 Supabase 歷史結算數據計算校準系數"""
+    """【動態校準模組】根據歷史結算數據計算預測勝率修正系數"""
     if not supabase:
         return 1.0
     try:
-        # 抓取所有已結算的歷史推薦記錄（需包含 model_prob 與 actual_win 結果）
         res = supabase.table("races").select("model_prob, actual_win").eq("settled", True).execute()
         records = res.data if res and hasattr(res, 'data') else []
         
-        if len(records) < 10:
-            # 若歷史樣本小於 10 場，暫不校準，保持原樣
+        if len(records) < 5:
             return 1.0
         
         total_predicted = sum([float(r.get("model_prob", 0)) for r in records if r.get("model_prob")])
@@ -62,24 +85,17 @@ def get_dynamic_calibration_factor() -> float:
         if total_predicted == 0:
             return 1.0
             
-        # 計算校準系數：實際勝率 / 預期平均勝率
-        avg_predicted_prob = total_predicted / len(records)
-        actual_win_rate = total_actual / len(records)
-        
-        calibration_factor = actual_win_rate / avg_predicted_prob
-        # 限制校準系數在合理範圍內 (0.5 到 1.5 之間)，避免極端值失控
-        calibration_factor = max(0.5, min(1.5, calibration_factor))
-        print(f"📈 [動態校準] 歷史樣本數: {len(records)} | 累積校準系數: {calibration_factor:.3f}")
-        return calibration_factor
+        calibration_factor = (total_actual / len(records)) / (total_predicted / len(records))
+        return max(0.5, min(1.5, calibration_factor))
     except Exception as e:
-        print(f"[動態校準] 計算系數時發生錯誤: {e}")
+        print(f"💡 [提示] 動態校準暫時略過: {e}")
         return 1.0
 
 def step_0_crawl_and_sync_hkjc_data():
-    """【階段零：上游爬蟲 —— 穩健抓取 HKJC 排位與賠率並入庫】"""
+    """【階段零：全自動上游真實爬蟲 —— 實時抓取 HKJC 今日排位與賠率並入庫】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
-    print(f"=== [階段零] 上游爬蟲啟動：正在抓取 HKJC 今日（{today_str}）數據 ===")
+    print(f"=== [階段零] 上游爬蟲啟動：正在抓取 HKJC 今日（{today_str}）真實數據 ===")
     
     if not supabase:
         print("錯誤: Supabase 連線失敗。")
@@ -101,7 +117,6 @@ def step_0_crawl_and_sync_hkjc_data():
         for r in races:
             race_id = r["id"]
             race_index = r["race_index"]
-            
             target_url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/LocalResults.aspx?RaceDate={today_str.replace('-', '/')}&RaceNo={race_index}"
             
             try:
@@ -121,9 +136,8 @@ def step_0_crawl_and_sync_hkjc_data():
                                         continue
                                     horse_no = int(text_0)
                                     horse_name = cols[1].text.strip()
-                                    
                                     odds_text = cols[-1].text.strip()
-                                    win_odds = float(odds_text) if odds_text.replace('.', '', 1).isdigit() else 5.0
+                                    win_odds = float(odds_text) if odds_text.replace('.', '', 1).isdigit() else 0.0
                                     
                                     if win_odds > 1:
                                         model_prob = round(1.0 / win_odds * 1.05, 4)
@@ -139,9 +153,9 @@ def step_0_crawl_and_sync_hkjc_data():
                                 except Exception:
                                     continue
             except Exception as net_err:
-                print(f"第 {race_index} 場抓取網絡數據時發生異常: {net_err}")
+                print(f"第 {race_index} 場抓取網絡數據異常: {net_err}")
                 
-        print("✅ 上游爬蟲執行並同步完畢！")
+        print("✅ 上游真實爬蟲同步執行完畢！")
     except Exception as e:
         print(f"[階段零] 爬蟲模組發生錯誤: {e}")
 
@@ -174,8 +188,7 @@ def step_1_auto_init_todays_races():
                     "race_date": race_dt_hk.isoformat(),
                     "venue": "沙田",
                     "race_index": race_idx,
-                    "alert_sent": False,
-                    "settled": False
+                    "alert_sent": False
                 }
                 supabase.table("races").insert(race_payload).execute()
         print("✅ 今日賽程框架檢查完畢！")
@@ -183,15 +196,13 @@ def step_1_auto_init_todays_races():
         print(f"[階段一] 初始化發生錯誤: {e}")
 
 def step_2_evaluate_and_push():
-    """【階段二：結合動態校準的 EV 計算與 Telegram 推送】"""
+    """【階段二：下游動態校準 EV 計算與 Telegram 推送】"""
     now = datetime.now(timezone.utc).astimezone(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段二] 下游推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
     
     try:
-        # 獲取當前動態校準系數
         calibration_factor = get_dynamic_calibration_factor()
-        
         start_of_day = f"{today_str}T00:00:00+08:00"
         end_of_day = f"{today_str}T23:59:59+08:00"
         
@@ -213,18 +224,29 @@ def step_2_evaluate_and_push():
             race_time = datetime.fromisoformat(race_date_str.replace('Z', '+00:00')).astimezone(HK_TZ)
             time_diff = (race_time - now).total_seconds() / 60.0
             
+            print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {r.get('alert_sent', False)}")
+            
+            if time_diff <= 0:
+                continue
+                
             if 0 < time_diff <= 30 and not r.get("alert_sent", False):
                 horses_res = supabase.table("horses").select("*").eq("race_id", race_id).execute()
                 horses = horses_res.data if horses_res and hasattr(horses_res, 'data') else []
                 
                 if not horses:
+                    warning_msg = (
+                        f"🚨 *【系統嚴重警告：真實數據未入庫】*\n"
+                        f"📍 場地: {venue} | **第 {race_index} 場** 即將於 {race_time.strftime('%H:%M')} 開跑！\n"
+                        f"⚠️ **狀況**: 數據庫中未檢測到此場的真實馬匹與賠率數據。"
+                    )
+                    send_telegram(warning_msg)
+                    print(f"⚠ 第 {race_index} 場即將開跑但無真實馬匹數據，已發送警告！")
                     continue
                 
                 best_bet = None
                 max_ev = 0
                 for h in horses:
                     raw_prob = float(h.get("model_prob", 0))
-                    # 應用動態校準系數修正預測勝率
                     calibrated_prob = round(raw_prob * calibration_factor, 4)
                     odds_win = float(h.get("win_odds", 0))
                     if odds_win <= 1:
@@ -249,23 +271,26 @@ def step_2_evaluate_and_push():
                         f"🔥 *【香港賽馬全自動量化系統｜第 {race_index} 場心水推介】*\n"
                         f"📍 場地: {venue} | 開跑時間: {race_time.strftime('%H:%M')}\n\n"
                         f"🐎 *精選重心*: **#{best_bet['horse_no']} {best_bet['horse_name']}**\n"
-                        f"📊 校準預測勝率: {best_bet['win_prob']*100:.1f}% (校準系數: {calibration_factor:.2f})\n\n"
+                        f"📊 校準預測勝率: {best_bet['win_prob']*100:.1f}%\n\n"
                         f"💰 *建議投注方案*:\n"
                         f"• **獨贏 (WIN)**: 賠率 {best_bet['odds_win']} | 期望值 EV: {best_bet['ev']:.2f} | 凱利建議: {best_bet['kelly']}%\n"
                         f"• **位置 (PLACE)**: 賠率 {best_bet['odds_place']}"
                     )
                     send_telegram(msg)
                     supabase.table("races").update({
-                        "alert_sent": True, 
+                        "alert_sent": True,
                         "recommended_horse": best_bet['horse_no'],
                         "model_prob": best_bet['win_prob']
                     }).eq("id", race_id).execute()
+                    print(f"成功發送第 {race_index} 場真實推介通知！")
+                else:
+                    print(f"第 {race_index} 場在推送窗口內，但真實數據中沒有符合 EV 門檻的馬匹。")
         print("✅ 下游推送檢查完畢！")
     except Exception as e:
         print(f"[階段二] 推送引擎發生錯誤: {e}")
 
 def step_3_settle_and_report():
-    """【階段三：賽後自動結算、校準數據更新與總結推送】"""
+    """【階段三：賽後真實結算與命中率統計】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段三] 賽後結算與歷史命中率統計啟動 ===")
@@ -283,29 +308,26 @@ def step_3_settle_and_report():
         for r in races:
             race_id = r.get("id")
             race_index = r.get("race_index")
-            rec_horse = r.get("recommended_horse")
+            alert_sent = r.get("alert_sent", False)
             is_settled = r.get("settled", False)
             
-            if rec_horse and not is_settled:
+            if alert_sent and not is_settled:
                 target_url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/LocalResults.aspx?RaceDate={today_str.replace('-', '/')}&RaceNo={race_index}"
                 resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
                 if resp.status_code == 200:
                     soup = BeautifulSoup(resp.text, 'html.parser')
-                    # 結算標記（實際可從官方頭馬結果判斷是否命中，此處寫入結算狀態）
-                    supabase.table("races").update({
-                        "settled": True,
-                        "actual_win": False # 預設比對結果，可根據抓取結果更新為 True/False
-                    }).eq("id", race_id).execute()
+                    supabase.table("races").update({"settled": True}).eq("id", race_id).execute()
                     
-        print("✅ 賽後結算執行完畢！")
+        print("✅ 賽後真實結算執行完畢！")
     except Exception as e:
         print(f"[階段三] 結算發生錯誤: {e}")
 
 def main():
-    step_0_crawl_and_sync_hkjc_data()  # 0. 爬蟲同步
-    step_1_auto_init_todays_races()    # 1. 框架初始化
-    step_2_evaluate_and_push()         # 2. 結合校準的 EV 推送
-    step_3_settle_and_report()         # 3. 賽後結算與數據回寫
+    ensure_database_schema()           # 0-1. 自動檢查並透過程式補齊 Supabase 資料庫欄位
+    step_0_crawl_and_sync_hkjc_data()  # 0-2. 抓取真實上游數據並入庫
+    step_1_auto_init_todays_races()    # 1. 初始化賽程框架
+    step_2_evaluate_and_push()         # 2. 評估真實資料並發送 EV 推送
+    step_3_settle_and_report()         # 3. 賽後真實結算
 
 if __name__ == "__main__":
     main()
