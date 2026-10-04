@@ -43,7 +43,7 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     return max(0.0, round(kelly * 100, 2))
 
 def run_main_bot():
-    """下游動態推送與計算 EV 引擎（含自動時間校正機制）"""
+    """下游動態推送與計算 EV 引擎（智慧時區解析，絕對不寫死時間）"""
     now = datetime.now(timezone.utc).astimezone(HK_TZ)
     print(f"=== 賽馬量化推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
     
@@ -67,15 +67,18 @@ def run_main_bot():
             if not race_date_str:
                 continue
             
-            # 標準解析時間
-            clean_date_str = race_date_str.replace('Z', '+00:00')
-            race_time_utc = datetime.fromisoformat(clean_date_str)
-            race_time = race_time_utc.astimezone(HK_TZ)
+            # 🛠️ 【智慧時間解析防呆】
+            # 無論 Supabase 存的是哪種格式，我們安全地進行解析
+            clean_str = race_date_str.replace('Z', '')
+            dt_obj = datetime.fromisoformat(clean_str)
             
-            # 🤖 【自動校正機制】如果資料庫讀出來的時間過早（例如早過 11 點，屬於上游寫入時區偏移錯誤），
-            # 我們自動將它加上 6 小時 37 分鐘（讓 05:53 自動變成 12:30）
-            if race_time.hour < 11:
-                race_time = race_time + timedelta(hours=6, minutes=37)
+            if dt_obj.tzinfo is None:
+                # 如果資料庫存進去的是沒有時區的純時間（例如 "2026-10-04T12:30:00"）
+                # 我們直接精準賦予它香港時區，不讓系統亂猜！
+                race_time = dt_obj.replace(tzinfo=HK_TZ)
+            else:
+                # 如果本身帶有時區，安全轉成香港時間
+                race_time = dt_obj.astimezone(HK_TZ)
             
             time_diff = (race_time - now).total_seconds() / 60.0
             print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {r.get('alert_sent', False)}")
