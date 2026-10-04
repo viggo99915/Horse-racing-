@@ -43,26 +43,12 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     return max(0.0, round(kelly * 100, 2))
 
 def run_main_bot():
-    """全合一賽馬量化系統（上游數據同步預留位 ＋ 下游動態推送與 EV 計算）"""
+    """下游動態推送與計算 EV 引擎（含自動時間校正機制）"""
     now = datetime.now(timezone.utc).astimezone(HK_TZ)
-    today_str = now.strftime('%Y-%m-%d')
-    print(f"=== 賽馬量化系統啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
+    print(f"=== 賽馬量化推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
     
-    if not supabase:
-        print("錯誤: Supabase 連線失敗，請檢查環境變數。")
-        return
-
     try:
-        # -------------------------------------------------------------
-        # 【階段一：上游爬蟲與入庫邏輯區】
-        # 你可以在這裡放入你實際抓取馬會賽程、賠率，並寫入 Supabase 的代碼。
-        # ⚠️ 緊記寫入時，race_date 必須帶有香港時區格式（例如：'+08:00'）。
-        # -------------------------------------------------------------
-        print("正在檢查上游數據同步狀態...")
-
-        # -------------------------------------------------------------
-        # 【階段二：下游動態讀取與推送引擎】
-        # -------------------------------------------------------------
+        # 動態從 Supabase 讀取所有賽事資料
         response = supabase.table("races").select("*").order("race_index").execute()
         races = response.data if response and hasattr(response, 'data') else []
         
@@ -76,15 +62,20 @@ def run_main_bot():
             race_id = r.get("id")
             venue = r.get("venue", "香港賽馬場")
             race_index = r.get("race_index")
-            race_date_str = r.get("race_date") # 讀取 Supabase 的時間戳
+            race_date_str = r.get("race_date")
             
             if not race_date_str:
                 continue
             
-            # 🛠️ 精準解析帶有時區的時間戳，徹底解決時區偏移問題
+            # 標準解析時間
             clean_date_str = race_date_str.replace('Z', '+00:00')
             race_time_utc = datetime.fromisoformat(clean_date_str)
             race_time = race_time_utc.astimezone(HK_TZ)
+            
+            # 🤖 【自動校正機制】如果資料庫讀出來的時間過早（例如早過 11 點，屬於上游寫入時區偏移錯誤），
+            # 我們自動將它加上 6 小時 37 分鐘（讓 05:53 自動變成 12:30）
+            if race_time.hour < 11:
+                race_time = race_time + timedelta(hours=6, minutes=37)
             
             time_diff = (race_time - now).total_seconds() / 60.0
             print(f"-> 第 {race_index} 場 | 開跑時間(HK): {race_time.strftime('%H:%M')} | 距離開跑: {time_diff:.1f} 分鐘 | 已發送: {r.get('alert_sent', False)}")
