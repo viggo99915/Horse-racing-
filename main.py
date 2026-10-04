@@ -42,8 +42,8 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     kelly = (b * p - q) / b
     return max(0.0, round(kelly * 100, 2))
 
-def run_racing_pipeline():
-    """下游動態推送與計算 EV 引擎"""
+def run_main_bot():
+    """下游動態推送與計算 EV 引擎（完全依賴真實上游數據）"""
     now = datetime.now(timezone.utc).astimezone(HK_TZ)
     print(f"=== 賽馬量化推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
     
@@ -135,7 +135,7 @@ def run_racing_pipeline():
             print("目前沒有在推送窗口內的有效真實賽事。")
 
     except Exception as e:
-        print(f"運行賽馬管線時發生錯誤: {e}")
+        print(f"運行賽馬程式時發生錯誤: {e}")
 
 if __name__ == "__main__":
-    run_racing_pipeline()
+    run_main_bot()
