@@ -67,10 +67,10 @@ def get_dynamic_calibration_factor() -> float:
         return 1.0
 
 def step_0_crawl_and_sync_hkjc_data():
-    """【階段零：官方精準時間綁定 + 絕對鎖定主排位表爬蟲】"""
+    """【階段零：精準時間綁定 + 全面修復馬匹抓取邏輯】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
-    print(f"=== [階段零] 上游爬蟲啟動：正在同步官方時間與精準出馬表（{today_str}） ===")
+    print(f"=== [階段零] 上游爬蟲啟動：正在同步官方正確時間與完整出馬表（{today_str}） ===")
     
     if not supabase:
         print("錯誤: Supabase 連線失敗。")
@@ -79,11 +79,11 @@ def step_0_crawl_and_sync_hkjc_data():
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         
-        # 🛡️ 官方固定標準開跑時間對應表（保證每一場的時間 100% 絕對正確，絕不亂跳）
+        # 🛡️ 根據你提供的最新準確官方開跑時間進行綁定（特別修正第 10 場 17:20 及第 11 場 17:55）
         official_schedule = {
             1: (12, 30), 2: (13, 5),  3: (13, 40), 4: (14, 15), 
             5: (14, 50), 6: (15, 25), 7: (16, 0),  8: (16, 45), 
-            9: (17, 10), 10: (17, 45), 11: (18, 20)
+            9: (17, 10), 10: (17, 20), 11: (17, 55)
         }
         
         for race_index, (h_val, m_val) in official_schedule.items():
@@ -121,73 +121,66 @@ def step_0_crawl_and_sync_hkjc_data():
                     
                 soup = BeautifulSoup(resp.text, 'html.parser')
                 
-                # 🛡️ 嚴格過濾表格：只選取包含「馬號」或「馬匹」關鍵字的表格（即真正的排位主表格）
+                # 💡 改進抓取策略：尋找所有表格內的行，放寬限制以確保所有正選馬（1-14號）完整入庫
                 tables = soup.find_all('table')
-                runner_table = None
-                for t in tables:
-                    t_text = t.get_text()
-                    if "馬號" in t_text and "馬匹名稱" in t_text:
-                        runner_table = t
-                        break
-                
-                if not runner_table:
-                    runner_table = soup # 若找不到標頭則退回全局，但配合後面嚴格校驗
-
                 matched_horses = 0
                 seen_horse_numbers = set()
                 
-                rows = runner_table.find_all('tr')
-                for row in rows:
-                    cols = row.find_all('td')
-                    if len(cols) >= 3:
-                        text_0 = cols[0].text.strip()
-                        # 馬號必須是嚴格的 1 到 14 之間的數字
-                        if text_0.isdigit() and 1 <= int(text_0) <= 14:
-                            horse_number = int(text_0)
-                            
-                            if horse_number in seen_horse_numbers:
-                                continue
+                for table in tables:
+                    rows = table.find_all('tr')
+                    for row in rows:
+                        cols = row.find_all('td')
+                        if len(cols) >= 2:
+                            text_0 = cols[0].text.strip()
+                            # 嚴格確認第一欄是 1 到 14 的數字作為馬號
+                            if text_0.isdigit() and 1 <= int(text_0) <= 14:
+                                horse_number = int(text_0)
                                 
-                            # 鎖定超連結內的真實馬名
-                            name_link = cols[1].find('a')
-                            if name_link:
-                                horse_name = name_link.text.strip()
-                            else:
-                                horse_name = cols[1].text.strip()
-                            
-                            # 嚴格防線：過濾掉近績、純數字或錯誤字串
-                            if not horse_name or len(horse_name) < 2 or horse_name.isdigit() or "/" in horse_name:
-                                continue
+                                if horse_number in seen_horse_numbers:
+                                    continue
+                                    
+                                # 優先抓取超連結中的馬名，若無則抓取文字
+                                name_link = cols[1].find('a')
+                                if name_link:
+                                    horse_name = name_link.text.strip()
+                                else:
+                                    horse_name = cols[1].text.strip()
+                                    
+                                # 🛡️ 安全過濾：排除空值、過短字串、純數字及近績符號
+                                if not horse_name or len(horse_name) < 2 or horse_name.isdigit() or "/" in horse_name:
+                                    continue
+                                    
+                                seen_horse_numbers.add(horse_number)
+                                matched_horses += 1
                                 
-                            seen_horse_numbers.add(horse_number)
-                            matched_horses += 1
-                            
-                            win_odds = 5.0
-                            model_prob = round(1.0 / win_odds * 1.05, 4)
-                            
-                            h_payload = {
-                                "race_id": race_id,
-                                "horse_number": horse_number,
-                                "horse_name": horse_name,
-                                "win_odds": win_odds,
-                                "place_odds": round(win_odds * 0.35 + 1.1, 2),
-                                "model_prob": model_prob
-                            }
-                            
-                            existing_h = supabase.table("horses").select("id").eq("race_id", race_id).eq("horse_number", horse_number).execute()
-                            if existing_h.data and len(existing_h.data) > 0:
-                                supabase.table("horses").update(h_payload).eq("race_id", race_id).eq("horse_number", horse_number).execute()
-                            else:
-                                supabase.table("horses").insert(h_payload).execute()
+                                win_odds = 5.0
+                                model_prob = round(1.0 / win_odds * 1.05, 4)
                                 
-                            if matched_horses >= 14:
-                                break
+                                h_payload = {
+                                    "race_id": race_id,
+                                    "horse_number": horse_number,
+                                    "horse_name": horse_name,
+                                    "win_odds": win_odds,
+                                    "place_odds": round(win_odds * 0.35 + 1.1, 2),
+                                    "model_prob": model_prob
+                                }
+                                
+                                existing_h = supabase.table("horses").select("id").eq("race_id", race_id).eq("horse_number", horse_number).execute()
+                                if existing_h.data and len(existing_h.data) > 0:
+                                    supabase.table("horses").update(h_payload).eq("race_id", race_id).eq("horse_number", horse_number).execute()
+                                else:
+                                    supabase.table("horses").insert(h_payload).execute()
+                                    
+                                if matched_horses >= 14:
+                                    break
+                    if matched_horses >= 14:
+                        break
                                 
                 print(f"   第 {race_index} 場時間鎖定 ({race_dt_hk.strftime('%H:%M')}) 且成功精準入庫 {matched_horses} 匹真實馬匹資料。")
             except Exception as net_err:
                 print(f"   第 {race_index} 場抓取網絡數據異常: {net_err}")
                 
-        print("✅ 上游精準排位與時間同步執行完畢！")
+        print("✅ 上游排位與時間同步執行完畢！")
     except Exception as e:
         print(f"[階段零] 爬蟲模組發生錯誤: {e}")
 
@@ -309,9 +302,9 @@ def step_3_settle_and_report():
         print(f"[階段三] 結算發生錯誤: {e}")
 
 def main():
-    step_0_crawl_and_sync_hkjc_data()  # 0. 官方時間綁定 + 精準主表過濾入庫
-    step_2_evaluate_and_push()         # 2. 推送引擎
-    step_3_settle_and_report()         # 3. 賽後結算
+    step_0_crawl_and_sync_hkjc_data()
+    step_2_evaluate_and_push()
+    step_3_settle_and_report()
 
 if __name__ == "__main__":
     main()
