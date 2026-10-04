@@ -67,7 +67,7 @@ def get_dynamic_calibration_factor() -> float:
         return 1.0
 
 def step_0_crawl_and_sync_hkjc_data():
-    """【階段零：上游真實爬蟲 —— 實時抓取 HKJC 今日排位表數據並入庫】"""
+    """【階段零：高靈敏度真實排位爬蟲（帶 Debug 輸出）】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
     print(f"=== [階段零] 上游爬蟲啟動：正在抓取 HKJC 今日（{today_str}）排位數據 ===")
@@ -93,29 +93,34 @@ def step_0_crawl_and_sync_hkjc_data():
             race_id = r["id"]
             race_index = r["race_index"]
             
-            # 💡 修正點：改用 HKJC 官方賽前排位表網址 (RaceCard.aspx) 確保能抓到出賽馬匹
             target_url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/RaceCard.aspx?RaceDate={today_str.replace('-', '/')}&RaceNo={race_index}"
+            print(f"-> 正在請求第 {race_index} 場網址: {target_url}")
             
             try:
                 resp = requests.get(target_url, headers=headers, timeout=10)
                 if resp.status_code == 200:
                     soup = BeautifulSoup(resp.text, 'html.parser')
-                    tables = soup.find_all('table', {'class': 'f_tac table_bd'})
+                    
+                    # 💡 靈活策略：不限特定 class，尋找頁面中所有表格
+                    tables = soup.find_all('table')
+                    matched_horses = 0
                     
                     for table in tables:
-                        rows = table.find_all('tr')[1:]
+                        rows = table.find_all('tr')
                         for row in rows:
                             cols = row.find_all('td')
-                            if len(cols) >= 3:
-                                try:
-                                    text_0 = cols[0].text.strip()
-                                    if not text_0.isdigit():
-                                        continue
+                            if len(cols) >= 2:
+                                text_0 = cols[0].text.strip()
+                                # 檢查第一欄是否為馬號 (1-14)
+                                if text_0.isdigit() and 1 <= int(text_0) <= 14:
                                     horse_no = int(text_0)
                                     horse_name = cols[1].text.strip()
                                     
-                                    # 排位表階段給予初始預設賠率（後續會隨時實時更新）
-                                    win_odds = 5.0  
+                                    # 若抓到的名稱太短或包含無關文字則跳過
+                                    if len(horse_name) < 2:
+                                        continue
+                                        
+                                    win_odds = 5.0 # 排位預設賠率
                                     model_prob = round(1.0 / win_odds * 1.05, 4)
                                     
                                     h_payload = {
@@ -127,10 +132,13 @@ def step_0_crawl_and_sync_hkjc_data():
                                         "model_prob": model_prob
                                     }
                                     supabase.table("horses").upsert(h_payload, on_conflict=["race_id", "horse_no"]).execute()
-                                except Exception:
-                                    continue
+                                    matched_horses += 1
+                                    
+                    print(f"   第 {race_index} 場成功解析並入庫 {matched_horses} 匹馬匹資料。")
+                else:
+                    print(f"   第 {race_index} 場請求失敗，狀態碼: {resp.status_code}")
             except Exception as net_err:
-                print(f"第 {race_index} 場抓取排位數據異常: {net_err}")
+                print(f"   第 {race_index} 場抓取網絡數據異常: {net_err}")
                 
         print("✅ 上游真實排位爬蟲同步執行完畢！")
     except Exception as e:
@@ -289,7 +297,6 @@ def step_3_settle_and_report():
             is_settled = r.get("settled", False)
             
             if alert_sent and not is_settled:
-                # 結算時才使用 LocalResults.aspx 抓取官方賽果
                 target_url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/LocalResults.aspx?RaceDate={today_str.replace('-', '/')}&RaceNo={race_index}"
                 resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
                 if resp.status_code == 200:
