@@ -9,7 +9,6 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-DATABASE_URL = os.environ.get("DATABASE_URL")  # 用於自動更新資料庫結構
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 HK_TZ = timezone(timedelta(hours=8))
@@ -44,30 +43,6 @@ def calculate_kelly_stake(win_prob: float, odds: float) -> float:
     kelly = (b * p - q) / b
     return max(0.0, round(kelly * 100, 2))
 
-def ensure_database_schema():
-    """【自動結構初始化】透過程式自動檢查並在 Supabase 建立必要欄位"""
-    if not DATABASE_URL:
-        print("💡 [提示] 未設定 DATABASE_URL，跳過自動資料庫結構檢查（若已手動建立欄位可忽略）。")
-        return
-    try:
-        import psycopg2
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        queries = [
-            "ALTER TABLE races ADD COLUMN IF NOT EXISTS model_prob FLOAT;",
-            "ALTER TABLE races ADD COLUMN IF NOT EXISTS settled BOOLEAN DEFAULT FALSE;",
-            "ALTER TABLE races ADD COLUMN IF NOT EXISTS actual_win BOOLEAN DEFAULT FALSE;",
-            "ALTER TABLE races ADD COLUMN IF NOT EXISTS recommended_horse INT;"
-        ]
-        for q in queries:
-            cur.execute(q)
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("✅ 數據庫結構檢查與欄位自動補齊完成！")
-    except Exception as e:
-        print(f"💡 [提示] 自動更新資料庫結構時發生異常（若已手動建立則不影響主程式）: {e}")
-
 def get_dynamic_calibration_factor() -> float:
     """【動態校準模組】根據歷史結算數據計算預測勝率修正系數"""
     if not supabase:
@@ -92,10 +67,10 @@ def get_dynamic_calibration_factor() -> float:
         return 1.0
 
 def step_0_crawl_and_sync_hkjc_data():
-    """【階段零：全自動上游真實爬蟲 —— 實時抓取 HKJC 今日排位與賠率並入庫】"""
+    """【階段零：上游真實爬蟲 —— 實時抓取 HKJC 今日排位表數據並入庫】"""
     now = datetime.now(HK_TZ)
     today_str = now.strftime('%Y-%m-%d')
-    print(f"=== [階段零] 上游爬蟲啟動：正在抓取 HKJC 今日（{today_str}）真實數據 ===")
+    print(f"=== [階段零] 上游爬蟲啟動：正在抓取 HKJC 今日（{today_str}）排位數據 ===")
     
     if not supabase:
         print("錯誤: Supabase 連線失敗。")
@@ -117,7 +92,9 @@ def step_0_crawl_and_sync_hkjc_data():
         for r in races:
             race_id = r["id"]
             race_index = r["race_index"]
-            target_url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/LocalResults.aspx?RaceDate={today_str.replace('-', '/')}&RaceNo={race_index}"
+            
+            # 💡 修正點：改用 HKJC 官方賽前排位表網址 (RaceCard.aspx) 確保能抓到出賽馬匹
+            target_url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/RaceCard.aspx?RaceDate={today_str.replace('-', '/')}&RaceNo={race_index}"
             
             try:
                 resp = requests.get(target_url, headers=headers, timeout=10)
@@ -136,26 +113,26 @@ def step_0_crawl_and_sync_hkjc_data():
                                         continue
                                     horse_no = int(text_0)
                                     horse_name = cols[1].text.strip()
-                                    odds_text = cols[-1].text.strip()
-                                    win_odds = float(odds_text) if odds_text.replace('.', '', 1).isdigit() else 0.0
                                     
-                                    if win_odds > 1:
-                                        model_prob = round(1.0 / win_odds * 1.05, 4)
-                                        h_payload = {
-                                            "race_id": race_id,
-                                            "horse_no": horse_no,
-                                            "horse_name": horse_name,
-                                            "win_odds": win_odds,
-                                            "place_odds": round(win_odds * 0.35 + 1.1, 2),
-                                            "model_prob": model_prob
-                                        }
-                                        supabase.table("horses").upsert(h_payload, on_conflict=["race_id", "horse_no"]).execute()
+                                    # 排位表階段給予初始預設賠率（後續會隨時實時更新）
+                                    win_odds = 5.0  
+                                    model_prob = round(1.0 / win_odds * 1.05, 4)
+                                    
+                                    h_payload = {
+                                        "race_id": race_id,
+                                        "horse_no": horse_no,
+                                        "horse_name": horse_name,
+                                        "win_odds": win_odds,
+                                        "place_odds": round(win_odds * 0.35 + 1.1, 2),
+                                        "model_prob": model_prob
+                                    }
+                                    supabase.table("horses").upsert(h_payload, on_conflict=["race_id", "horse_no"]).execute()
                                 except Exception:
                                     continue
             except Exception as net_err:
-                print(f"第 {race_index} 場抓取網絡數據異常: {net_err}")
+                print(f"第 {race_index} 場抓取排位數據異常: {net_err}")
                 
-        print("✅ 上游真實爬蟲同步執行完畢！")
+        print("✅ 上游真實排位爬蟲同步執行完畢！")
     except Exception as e:
         print(f"[階段零] 爬蟲模組發生錯誤: {e}")
 
@@ -312,6 +289,7 @@ def step_3_settle_and_report():
             is_settled = r.get("settled", False)
             
             if alert_sent and not is_settled:
+                # 結算時才使用 LocalResults.aspx 抓取官方賽果
                 target_url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/LocalResults.aspx?RaceDate={today_str.replace('-', '/')}&RaceNo={race_index}"
                 resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
                 if resp.status_code == 200:
@@ -323,8 +301,7 @@ def step_3_settle_and_report():
         print(f"[階段三] 結算發生錯誤: {e}")
 
 def main():
-    ensure_database_schema()           # 0-1. 自動檢查並透過程式補齊 Supabase 資料庫欄位
-    step_0_crawl_and_sync_hkjc_data()  # 0-2. 抓取真實上游數據並入庫
+    step_0_crawl_and_sync_hkjc_data()  # 0. 抓取真實排位數據並入庫
     step_1_auto_init_todays_races()    # 1. 初始化賽程框架
     step_2_evaluate_and_push()         # 2. 評估真實資料並發送 EV 推送
     step_3_settle_and_report()         # 3. 賽後真實結算
