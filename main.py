@@ -53,8 +53,11 @@ def step_1_auto_init_todays_races():
         return
 
     try:
-        # 檢查資料庫是否已經有「今日」的賽事
-        res = supabase.table("races").select("*").ilike("race_date", f"{today_str}%").execute()
+        # 用時間範圍查詢今日是否已有賽事（避開 timestamptz 不支援 ilike 的問題）
+        start_of_day = f"{today_str}T00:00:00+08:00"
+        end_of_day = f"{today_str}T23:59:59+08:00"
+        
+        res = supabase.table("races").select("*").gte("race_date", start_of_day).lte("race_date", end_of_day).execute()
         todays_races = res.data if res and hasattr(res, 'data') else []
         
         # 如果今日還沒有數據，自動生成並寫入精確帶有 +08:00 的今日標準 11 場賽程
@@ -68,9 +71,8 @@ def step_1_auto_init_todays_races():
             ]
             
             for race_idx, h, m in standard_times:
-                # 建立精準帶有 +08:00 時區的 datetime
                 race_dt_hk = datetime(now.year, now.month, now.day, h, m, 0, tzinfo=HK_TZ)
-                race_dt_str = race_dt_hk.isoformat() # 格式: '2026-10-04T12:30:00+08:00'
+                race_dt_str = race_dt_hk.isoformat()
                 
                 # 1. 寫入 races
                 race_payload = {
@@ -82,7 +84,7 @@ def step_1_auto_init_todays_races():
                 supabase.table("races").upsert(race_payload, on_conflict=["race_date", "race_index"]).execute()
                 
                 # 取得剛寫入的 id 準備寫入測試馬匹數據
-                r_fetch = supabase.table("races").select("id").eq("race_index", race_idx).ilike("race_date", f"{today_str}%").execute()
+                r_fetch = supabase.table("races").select("id").eq("race_index", race_idx).gte("race_date", start_of_day).lte("race_date", end_of_day).execute()
                 if r_fetch.data:
                     r_id = r_fetch.data[0]["id"]
                     sample_horses = [
@@ -93,7 +95,7 @@ def step_1_auto_init_todays_races():
                     for h_data in sample_horses:
                         supabase.table("horses").upsert(h_data, on_conflict=["race_id", "horse_no"]).execute()
             
-            print("✅ 成功自動初始化今日（10月4日）所有賽事與正確時區數據！")
+            print("✅ 成功自動初始化今日所有賽事與正確時區數據！")
         else:
             print("今日賽事數據已存在，跳過初始化。")
 
@@ -107,8 +109,11 @@ def step_2_evaluate_and_push():
     print(f"=== [階段二] 下游推送引擎啟動 (香港時間: {now.strftime('%Y-%m-%d %H:%M:%S')}) ===")
     
     try:
-        # 只抓取今日的賽事進行計算
-        response = supabase.table("races").select("*").ilike("race_date", f"{today_str}%").order("race_index").execute()
+        start_of_day = f"{today_str}T00:00:00+08:00"
+        end_of_day = f"{today_str}T23:59:59+08:00"
+        
+        # 使用範圍查詢抓取今日賽事
+        response = supabase.table("races").select("*").gte("race_date", start_of_day).lte("race_date", end_of_day).order("race_index").execute()
         races = response.data if response and hasattr(response, 'data') else []
         
         if not races:
@@ -126,7 +131,6 @@ def step_2_evaluate_and_push():
             if not race_date_str:
                 continue
             
-            # 智慧解析帶有 +08:00 的時間戳
             clean_date_str = race_date_str.replace('Z', '+00:00')
             race_time_utc = datetime.fromisoformat(clean_date_str)
             race_time = race_time_utc.astimezone(HK_TZ)
