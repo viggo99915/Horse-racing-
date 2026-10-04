@@ -1,33 +1,18 @@
-name: Horse Racing Crawler
-
-on:
-  schedule:
-    - cron: '*/5 4-15 * * 0'  # 星期日 (日馬)
-    - cron: '*/5 4-15 * * 3'  # 星期三 (夜馬)
-    - cron: '*/5 4-15 * * 4'  # 星期四 (特別賽馬日防護，如今日國慶日)
-    - cron: '*/5 4-15 * * 6'  # 星期六 (加場防護)
-  workflow_dispatch:
-
 jobs:
-  crawl:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install supabase requests beautifulsoup4 lxml  # (按你爬蟲實際需要的套件調整)
-
-      - name: Run Crawler
+        run: pip install requests supabase
+      - name: Run main.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: |
-          python main.py  
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
