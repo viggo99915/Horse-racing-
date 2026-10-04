@@ -1,3 +1,10 @@
+name: Race Bot
+
+on:
+  schedule:
+    - cron: '30 4 * * *'
+  workflow_dispatch:  # 呢行會解鎖 Actions 頁面右上角嘅「Run workflow」手動按鈕
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -7,9 +14,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Install dependencie 
+      - name: Install dependencies
         run: pip install requests supabase beautifulsoup4
-name: Run main.py
+      - name: Run main.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
